@@ -1,5 +1,9 @@
 # Soga
 
+<p align="center">
+  <img src="assets/soga-package-icon.png" alt="Soga logo" width="180">
+</p>
+
 > Build conversations. Own your infrastructure.
 
 Soga is an open-source, self-hosted messaging framework for ASP.NET Core. It provides the application layer developers need above SignalR, including conversations, persistent messages, authorization, message history, read state, realtime events, and reconnection support.

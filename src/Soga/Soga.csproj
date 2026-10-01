@@ -18,4 +18,11 @@
     <None Include="..\..\assets\soga-package-icon.png" Pack="true" PackagePath="" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Soga.EntityFrameworkCore" />
+    <InternalsVisibleTo Include="Soga.Tests" />
+    <InternalsVisibleTo Include="Soga.IntegrationTests" />
+    <InternalsVisibleTo Include="Soga.EntityFrameworkCore.Tests" />
+  </ItemGroup>
+
 </Project>

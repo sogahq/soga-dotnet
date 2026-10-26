@@ -9,9 +9,18 @@ using Soga.Synchronization;
 namespace Soga.Realtime;
 
 /// <summary>
-/// Expires stale typing indicators and ends presence after the grace period. Both are in-memory and advisory: losing
-/// them (a restart, a crashed tick) can leave an indicator briefly wrong but never affects durable correctness.
+/// A background service that expires stale typing indicators and marks users offline after their grace period.
 /// </summary>
+/// <param name="hub">The hub context used to broadcast typing changes.</param>
+/// <param name="typing">The tracker of who is typing.</param>
+/// <param name="presence">The presence provider.</param>
+/// <param name="presenceBroadcaster">Broadcasts users who have just gone offline.</param>
+/// <param name="clock">The clock used for expiry.</param>
+/// <param name="options">The Soga options that enable typing and presence.</param>
+/// <remarks>
+/// Typing and presence are in memory and advisory. Losing them, through a restart or a failed pass, can leave an
+/// indicator briefly wrong but never affects durable messages.
+/// </remarks>
 internal sealed class SogaEphemeralService(
     IHubContext<SogaHub> hub,
     SogaTypingTracker typing,
@@ -20,8 +29,16 @@ internal sealed class SogaEphemeralService(
     TimeProvider clock,
     IOptions<SogaOptions> options) : BackgroundService
 {
+    /// <summary>
+    /// How often an expiry pass runs.
+    /// </summary>
     private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(500);
 
+    /// <summary>
+    /// Runs expiry passes until the host stops.
+    /// </summary>
+    /// <param name="stoppingToken">Triggered when the host is shutting down.</param>
+    /// <returns>A task that completes when the service stops.</returns>
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
@@ -44,7 +61,12 @@ internal sealed class SogaEphemeralService(
         }
     }
 
-    /// <summary>Runs one expiry pass. Exposed for tests.</summary>
+    /// <summary>
+    /// Runs one expiry pass: broadcasts typing indicators that timed out and users who have just gone offline.
+    /// </summary>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <remarks>Internal so that tests can drive expiry without waiting for the timer.</remarks>
     internal async Task TickAsync(CancellationToken cancellationToken)
     {
         var settings = options.Value;

@@ -5,13 +5,22 @@ using Soga.Errors;
 
 namespace Soga.Security;
 
-/// <summary>Helpers for hosts that rate-limit Soga endpoints with the ASP.NET Core rate limiter.</summary>
+/// <summary>
+/// Provides extension methods for hosts that protect Soga endpoints with the ASP.NET Core rate limiter.
+/// </summary>
 public static class SogaRateLimiterOptionsExtensions
 {
     /// <summary>
-    /// Makes rejected requests return a Problem Details body with the stable <c>soga.rate_limited</c> code
-    /// (and <c>Retry-After</c> when the limiter supplies it), so clients never parse English text.
+    /// Configures rejected requests to return a Problem Details response with the stable <c>soga.rate_limited</c>
+    /// code, so clients never have to parse English text.
     /// </summary>
+    /// <param name="options">The rate limiter options to configure.</param>
+    /// <returns>The same <paramref name="options"/> instance, so further calls can be chained.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <remarks>
+    /// The response status is 429. When the limiter supplies a retry delay, the <c>Retry-After</c> header is set to the
+    /// delay in whole seconds, rounded up.
+    /// </remarks>
     public static RateLimiterOptions UseSogaRejectionResponse(this RateLimiterOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);

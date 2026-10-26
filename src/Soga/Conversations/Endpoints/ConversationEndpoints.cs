@@ -9,8 +9,19 @@ using Soga.Extensions;
 
 namespace Soga.Conversations.Endpoints;
 
+/// <summary>
+/// Maps the HTTP endpoints for creating, listing, and reading conversations.
+/// </summary>
+/// <remarks>
+/// Endpoints only translate HTTP to workflow calls. Validation and authorization live in
+/// <see cref="ConversationWorkflow"/>.
+/// </remarks>
 internal static class ConversationEndpoints
 {
+    /// <summary>
+    /// Adds the conversation endpoints to the Soga route group.
+    /// </summary>
+    /// <param name="group">The Soga route group created by <see cref="SogaEndpointRouteBuilderExtensions.MapSoga"/>.</param>
     public static void Map(RouteGroupBuilder group)
     {
         group.MapPost("/conversations/direct", CreateDirectAsync)
@@ -33,6 +44,16 @@ internal static class ConversationEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound);
     }
 
+    /// <summary>
+    /// Handles <c>POST /conversations/direct</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="workflow">The conversation workflow.</param>
+    /// <param name="options">The Soga options, used to build the <c>Location</c> header.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is 201 with a <c>Location</c> header when the
+    /// conversation was created, or 200 when it already existed.
+    /// </returns>
     private static async Task<IResult> CreateDirectAsync(
         HttpContext http,
         ConversationWorkflow workflow,
@@ -55,6 +76,13 @@ internal static class ConversationEndpoints
                 : Results.Ok(result.Value));
     }
 
+    /// <summary>
+    /// Handles <c>GET /conversations</c>, reading the <c>limit</c>, <c>cursor</c>, <c>kind</c>, <c>state</c>, and
+    /// <c>externalReference</c> query values.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="workflow">The conversation workflow.</param>
+    /// <returns>A task whose result is one page of the caller's conversations.</returns>
     private static Task<IResult> ListAsync(HttpContext http, ConversationWorkflow workflow)
     {
         if (!SogaHttp.TryGetLimit(http, out var limit))
@@ -75,12 +103,25 @@ internal static class ConversationEndpoints
             page => Results.Ok(page));
     }
 
+    /// <summary>
+    /// Handles <c>GET /conversations/{id}</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The conversation ID from the route.</param>
+    /// <param name="workflow">The conversation workflow.</param>
+    /// <returns>A task whose result is the conversation, or 404 when the caller is not a participant.</returns>
     private static Task<IResult> GetAsync(HttpContext http, Guid id, ConversationWorkflow workflow) =>
         SogaHttp.RunAsync(
             http,
             (caller, ct) => workflow.GetAsync(caller, id, ct),
             conversation => Results.Ok(conversation));
 
+    /// <summary>
+    /// Gets an optional query string value.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="name">The query string key.</param>
+    /// <returns>The value, or <see langword="null"/> when it is absent or empty.</returns>
     private static string? Query(HttpContext http, string name)
     {
         var value = http.Request.Query[name].ToString();

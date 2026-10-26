@@ -6,16 +6,32 @@ using Soga.Synchronization;
 
 namespace Soga.EntityFrameworkCore.Repositories;
 
+/// <content>
+/// Contains transaction handling, sequence allocation, and the change and outbox writes shared by every operation.
+/// </content>
 internal sealed partial class EfSogaStore<TContext>
 {
+    /// <summary>
+    /// The number of times an operation is attempted when it loses a unique-constraint race.
+    /// </summary>
     private const int MaximumConstraintRetries = 3;
 
     /// <summary>
-    /// Runs an operation in one transaction with the provider's execution strategy. If a concurrent request wins a
-    /// unique constraint (direct conversation, client message ID, first change sequence), the operation is retried:
-    /// its prechecks then resolve to the winner's committed result. When the host already opened a transaction, Soga
-    /// joins it and never commits or retries on the host's behalf.
+    /// Runs an operation in one transaction using the provider's execution strategy.
     /// </summary>
+    /// <typeparam name="T">The type of the operation's result.</typeparam>
+    /// <param name="operation">The operation to run. It must be safe to run again from the start.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result is the operation's result.</returns>
+    /// <remarks>
+    /// <para>
+    /// If a concurrent request wins a unique constraint (direct conversation, client message ID, or first change
+    /// sequence), the operation is retried, and its prechecks then find the winner's committed result.
+    /// </para>
+    /// <para>
+    /// When the host has already opened a transaction, Soga joins it and never commits or retries on the host's behalf.
+    /// </para>
+    /// </remarks>
     private Task<T> ExecuteInTransactionAsync<T>(
         Func<CancellationToken, Task<T>> operation,
         CancellationToken cancellationToken)
@@ -51,6 +67,9 @@ internal sealed partial class EfSogaStore<TContext>
             cancellationToken);
     }
 
+    /// <summary>
+    /// Detaches every tracked Soga row after a rolled-back attempt, leaving the host's own tracked entities untouched.
+    /// </summary>
     private void DetachSogaEntities()
     {
         foreach (var entry in _db.ChangeTracker.Entries().ToList())
@@ -63,9 +82,17 @@ internal sealed partial class EfSogaStore<TContext>
     }
 
     /// <summary>
-    /// Atomically advances the conversation counter. The UPDATE takes a row lock that is held until commit, so
-    /// concurrent senders serialize per conversation, sequences have no gaps, and a rollback returns the number.
+    /// Allocates the next message sequence in a conversation and updates its last activity time (ADR 0006).
     /// </summary>
+    /// <param name="tenantId">The tenant of the conversation.</param>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <param name="now">The new last activity time.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result is the allocated sequence.</returns>
+    /// <remarks>
+    /// The UPDATE takes a row lock that is held until commit, so concurrent senders serialize per conversation,
+    /// sequences have no gaps, and a rollback gives the number back.
+    /// </remarks>
     private async Task<long> AllocateMessageSequenceAsync(
         string tenantId,
         Guid conversationId,
@@ -86,9 +113,19 @@ internal sealed partial class EfSogaStore<TContext>
     }
 
     /// <summary>
-    /// Allocates the next per-tenant change sequence under a row lock held until commit. Because commit order equals
-    /// sequence order, a client that read up to sequence N can never later see a change below N appear (ADR 0008).
+    /// Allocates the next change-log sequence in a tenant (ADR 0008).
     /// </summary>
+    /// <param name="tenantId">The tenant.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result is the allocated sequence.</returns>
+    /// <exception cref="DbUpdateException">
+    /// Another request created the tenant's counter at the same moment. <see cref="ExecuteInTransactionAsync{T}"/>
+    /// retries the operation, which then takes the update path.
+    /// </exception>
+    /// <remarks>
+    /// The sequence is allocated under a row lock held until commit. Because commit order equals sequence order, a
+    /// client that has read up to sequence N can never later see a change below N appear.
+    /// </remarks>
     private async Task<long> AllocateChangeSequenceAsync(string tenantId, CancellationToken cancellationToken)
     {
         var updated = await _db.Set<TenantStateRow>()
@@ -111,9 +148,15 @@ internal sealed partial class EfSogaStore<TContext>
     }
 
     /// <summary>
-    /// Adds the durable change and the outbox event for one protocol event. Both share the event ID and payload.
-    /// <paramref name="targetUserId"/> keeps the change visible to that user through sync after they lose access.
+    /// Adds the change-log row and the outbox row for one protocol event to the current transaction.
     /// </summary>
+    /// <param name="tenantId">The tenant of the event.</param>
+    /// <param name="changeSequence">The change-log sequence allocated for the event.</param>
+    /// <param name="evt">The event.</param>
+    /// <param name="targetUserId">
+    /// A user who keeps seeing the change through sync after losing access to the conversation, if any.
+    /// </param>
+    /// <remarks>Both rows share the event ID and payload, so clients can deduplicate live and synced copies.</remarks>
     private void Enqueue(string tenantId, long changeSequence, SogaEvent evt, string? targetUserId = null)
     {
         var payload = SogaEventSerializer.Serialize(evt);

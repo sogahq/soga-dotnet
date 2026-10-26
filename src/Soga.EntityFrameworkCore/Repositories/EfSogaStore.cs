@@ -11,16 +11,39 @@ using Soga.Synchronization;
 namespace Soga.EntityFrameworkCore.Repositories;
 
 /// <summary>
-/// The relational Soga store. Every write commits the entity change, its durable synchronization change, and its
-/// outbox event in one transaction. Ordering, idempotency, and uniqueness are enforced by database constraints;
-/// application prechecks only make the common path cheap. Group changes lock the conversation row and are decided
-/// by the same pure <c>GroupRules</c> the in-memory provider uses.
+/// The Entity Framework Core implementation of <see cref="ISogaStore"/>, which stores Soga data in the host's
+/// relational database.
 /// </summary>
+/// <typeparam name="TContext">The host database context, whose model includes the Soga tables.</typeparam>
+/// <remarks>
+/// <para>
+/// Every write commits the entity change, its durable sync change, and its outbox event in one transaction.
+/// Ordering, idempotency, and uniqueness are enforced by database constraints; application prechecks only make the
+/// common path cheap.
+/// </para>
+/// <para>
+/// Group changes lock the conversation row and are decided by the same pure <see cref="GroupRules"/> that the
+/// in-memory store uses.
+/// </para>
+/// <para>
+/// The class is split across files by concern: conversations and groups here, and messages, transactions, sync, and
+/// outbox in their own partial files.
+/// </para>
+/// </remarks>
 internal sealed partial class EfSogaStore<TContext> : ISogaStore
     where TContext : DbContext
 {
+    /// <summary>
+    /// The host database context.
+    /// </summary>
     private readonly TContext _db;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="EfSogaStore{TContext}"/> class.
+    /// </summary>
+    /// <param name="db">The host database context.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="db"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">The context's model is missing the Soga tables or is unsafe.</exception>
     public EfSogaStore(TContext db)
     {
         ArgumentNullException.ThrowIfNull(db);
@@ -29,8 +52,10 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         _db = db;
     }
 
+    /// <inheritdoc />
     public bool IsDurable => true;
 
+    /// <inheritdoc />
     public Task<DirectConversationOutcome> GetOrCreateDirectConversationAsync(
         CreateDirectConversationCommand command,
         CancellationToken cancellationToken) =>
@@ -96,6 +121,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public Task<ConversationRecord> CreateGroupAsync(CreateGroupCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
@@ -143,6 +169,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public Task<GroupMutationOutcome> MutateGroupAsync(GroupMutationCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
@@ -217,6 +244,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public async Task<ConversationAccess?> GetAccessAsync(
         string tenantId,
         string userId,
@@ -243,12 +271,14 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         return access is null ? null : new ConversationAccess(access.Kind, access.Role, access.Archived, access.ExternalReference);
     }
 
+    /// <inheritdoc />
     public Task<ConversationRecord?> GetConversationAsync(
         string tenantId,
         string userId,
         Guid conversationId,
         CancellationToken cancellationToken) => LoadOneAsync(tenantId, userId, conversationId, cancellationToken);
 
+    /// <inheritdoc />
     public async Task<ConversationPage> ListConversationsAsync(ListConversationsQuery query, CancellationToken cancellationToken)
     {
         var (items, hasMore) = await LoadConversationsAsync(
@@ -266,6 +296,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         return new ConversationPage(items, hasMore);
     }
 
+    /// <inheritdoc />
     public async Task<IReadOnlyList<Guid>> ListActiveConversationIdsAsync(
         string tenantId,
         string userId,
@@ -283,9 +314,20 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         return ids;
     }
 
+    /// <inheritdoc />
     public async Task<bool> CheckHealthAsync(CancellationToken cancellationToken) =>
         await _db.Database.CanConnectAsync(cancellationToken);
 
+    /// <summary>
+    /// Creates a new participant row.
+    /// </summary>
+    /// <param name="tenantId">The tenant of the conversation.</param>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <param name="userId">The participant's user ID.</param>
+    /// <param name="role">The participant's role.</param>
+    /// <param name="now">The time the participant joins.</param>
+    /// <param name="lastReadSequence">The initial read position.</param>
+    /// <returns>The new, untracked row.</returns>
     private static ParticipantRow NewParticipant(
         string tenantId,
         Guid conversationId,
@@ -302,6 +344,15 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         LastReadSequence = lastReadSequence,
     };
 
+    /// <summary>
+    /// Writes an accepted group change to the tracked rows.
+    /// </summary>
+    /// <param name="command">The group change.</param>
+    /// <param name="conversation">The locked conversation row.</param>
+    /// <param name="participants">Every current and former participant row of the group.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <remarks>Only call this after <see cref="GroupRules.Decide"/> has accepted the change.</remarks>
     private async Task ApplyMutationAsync(
         GroupMutationCommand command,
         ConversationRow conversation,
@@ -370,6 +421,13 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         }
     }
 
+    /// <summary>
+    /// Adds a system message, with its change and outbox rows, to the current transaction.
+    /// </summary>
+    /// <param name="command">The group change that the message describes.</param>
+    /// <param name="content">The system message body.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     private async Task AddSystemMessageAsync(GroupMutationCommand command, string content, CancellationToken cancellationToken)
     {
         var messageId = command.Ids.NewId();
@@ -402,6 +460,17 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
         Enqueue(command.TenantId, changeSequence, SogaEventFactory.MessageCreated(command.Ids.NewId(), record, command.Now));
     }
 
+    /// <summary>
+    /// Loads one conversation, with its participants, as seen by one of its active participants.
+    /// </summary>
+    /// <param name="tenantId">The tenant.</param>
+    /// <param name="userId">The viewing user.</param>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the conversation, or
+    /// <see langword="null"/> when the user is not an active participant.
+    /// </returns>
     private async Task<ConversationRecord?> LoadOneAsync(
         string tenantId,
         string userId,
@@ -424,9 +493,29 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
     }
 
     /// <summary>
-    /// Loads conversation summaries with a fixed number of queries regardless of page size: one projection with unread
-    /// counts, then batched lookups for participant counts, participant lists, and last messages.
+    /// Loads the conversations a user participates in, most recent activity first.
     /// </summary>
+    /// <param name="tenantId">The tenant.</param>
+    /// <param name="userId">The viewing user.</param>
+    /// <param name="conversationId">Load only this conversation, or <see langword="null"/> for all.</param>
+    /// <param name="kind">An optional kind filter.</param>
+    /// <param name="state">The archive state filter.</param>
+    /// <param name="reference">An optional external reference filter.</param>
+    /// <param name="afterActivity">Continue at or before this activity time, or <see langword="null"/> for the first page.</param>
+    /// <param name="skip">How many conversations with exactly <paramref name="afterActivity"/> to skip.</param>
+    /// <param name="limit">The page size.</param>
+    /// <param name="allParticipants">
+    /// <see langword="true"/> to load the participant list of every conversation; otherwise, only direct conversations
+    /// get one.
+    /// </param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the page and whether more follow.
+    /// </returns>
+    /// <remarks>
+    /// The number of queries is fixed regardless of page size: one projection with unread counts, then batched lookups
+    /// for participant counts, participant lists, and last messages.
+    /// </remarks>
     private async Task<(List<ConversationRecord> Items, bool HasMore)> LoadConversationsAsync(
         string tenantId,
         string userId,

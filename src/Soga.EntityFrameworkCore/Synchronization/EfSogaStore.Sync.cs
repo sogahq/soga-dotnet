@@ -4,8 +4,12 @@ using Soga.Persistence;
 
 namespace Soga.EntityFrameworkCore.Repositories;
 
+/// <content>
+/// Contains the change-log queries used by sync.
+/// </content>
 internal sealed partial class EfSogaStore<TContext>
 {
+    /// <inheritdoc />
     public async Task<long> GetChangeHeadAsync(string tenantId, CancellationToken cancellationToken)
     {
         var head = await _db.Set<TenantStateRow>()
@@ -16,6 +20,7 @@ internal sealed partial class EfSogaStore<TContext>
         return head ?? 0;
     }
 
+    /// <inheritdoc />
     public async Task<ChangePage> GetChangesAsync(
         string tenantId,
         string userId,

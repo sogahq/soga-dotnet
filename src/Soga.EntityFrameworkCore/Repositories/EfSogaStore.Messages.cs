@@ -8,8 +8,12 @@ using Soga.Synchronization;
 
 namespace Soga.EntityFrameworkCore.Repositories;
 
+/// <content>
+/// Contains the message operations: send, edit, delete, history, and read state.
+/// </content>
 internal sealed partial class EfSogaStore<TContext>
 {
+    /// <inheritdoc />
     public Task<AppendMessageOutcome> AppendMessageAsync(
         AppendMessageCommand command,
         CancellationToken cancellationToken) =>
@@ -95,6 +99,7 @@ internal sealed partial class EfSogaStore<TContext>
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public Task<EditMessageOutcome> EditMessageAsync(EditMessageCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
@@ -170,6 +175,7 @@ internal sealed partial class EfSogaStore<TContext>
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public Task<DeleteMessageOutcome> DeleteMessageAsync(DeleteMessageCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
@@ -250,6 +256,7 @@ internal sealed partial class EfSogaStore<TContext>
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public async Task<IReadOnlyList<MessageRecord>?> GetMessagesAsync(
         string tenantId,
         string userId,
@@ -277,6 +284,7 @@ internal sealed partial class EfSogaStore<TContext>
         return await HydrateAsync(tenantId, rows, cancellationToken);
     }
 
+    /// <inheritdoc />
     public Task<AdvanceReadOutcome> AdvanceReadPositionAsync(
         AdvanceReadCommand command,
         CancellationToken cancellationToken) =>
@@ -362,6 +370,7 @@ internal sealed partial class EfSogaStore<TContext>
             },
             cancellationToken);
 
+    /// <inheritdoc />
     public async Task<long> GetTotalUnreadAsync(string tenantId, string userId, CancellationToken cancellationToken)
     {
         var unread =
@@ -380,6 +389,17 @@ internal sealed partial class EfSogaStore<TContext>
         return await unread.LongCountAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Determines whether a user is an active participant of a conversation.
+    /// </summary>
+    /// <param name="tenantId">The tenant.</param>
+    /// <param name="userId">The user.</param>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is <see langword="true"/> if the user is a
+    /// participant who has not left; otherwise, <see langword="false"/>.
+    /// </returns>
     private async Task<bool> IsActiveParticipantAsync(
         string tenantId,
         string userId,
@@ -392,7 +412,17 @@ internal sealed partial class EfSogaStore<TContext>
                 p.LeftAt == null,
             cancellationToken);
 
-    /// <summary>Converts rows to records and attaches a bounded summary of each replied-to message with one batched query.</summary>
+    /// <summary>
+    /// Converts message rows to records and attaches a summary of each replied-to message.
+    /// </summary>
+    /// <param name="tenantId">The tenant of the messages.</param>
+    /// <param name="rows">The message rows.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the records, in the same order as
+    /// <paramref name="rows"/>.
+    /// </returns>
+    /// <remarks>Every reply target is loaded with one batched query, whatever the number of rows.</remarks>
     private async Task<List<MessageRecord>> HydrateAsync(
         string tenantId,
         IReadOnlyList<MessageRow> rows,

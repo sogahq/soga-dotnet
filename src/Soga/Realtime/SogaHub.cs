@@ -15,10 +15,29 @@ using Soga.Synchronization;
 namespace Soga.Realtime;
 
 /// <summary>
-/// A thin authenticated hub. It holds no business logic and no durable state: every subscription is authorized through
-/// the same membership check and host policies the HTTP API uses, and group membership is never treated as
-/// authorization on its own.
+/// The Soga SignalR hub, mapped at <c>{prefix}/hub</c>.
 /// </summary>
+/// <param name="resolver">Resolves the trusted caller when a connection opens.</param>
+/// <param name="authorizer">Checks membership and host policies for every subscription.</param>
+/// <param name="store">The persistence store.</param>
+/// <param name="registry">Tracks this process's connections and their subscriptions.</param>
+/// <param name="typing">Tracks typing indicators.</param>
+/// <param name="presence">The presence provider.</param>
+/// <param name="presenceBroadcaster">Broadcasts presence changes.</param>
+/// <param name="clock">The clock that timestamps ephemeral events.</param>
+/// <param name="options">The Soga options that enable typing and presence.</param>
+/// <param name="httpContextAccessor">Receives the connection's HTTP context so host tenant resolvers work.</param>
+/// <remarks>
+/// <para>
+/// The hub is thin: it holds no business logic and no durable state. Messages are sent over HTTP; the hub only
+/// delivers notifications. Every subscription is authorized through the same membership check and host policies as the
+/// HTTP API, and SignalR group membership is never treated as authorization on its own.
+/// </para>
+/// <para>
+/// Hub errors are reported as a <see cref="HubException"/> whose message is a stable code from
+/// <see cref="SogaErrorCodes"/>.
+/// </para>
+/// </remarks>
 [Authorize]
 internal sealed class SogaHub(
     SogaCallerResolver resolver,
@@ -32,9 +51,24 @@ internal sealed class SogaHub(
     IOptions<SogaOptions> options,
     IHttpContextAccessor httpContextAccessor) : Hub
 {
+    /// <summary>
+    /// The <see cref="HubCallerContext.Items"/> key that holds the connection's <see cref="SogaCaller"/>.
+    /// </summary>
     private const string CallerKey = "soga.caller";
+
+    /// <summary>
+    /// The largest number of conversations <see cref="SubscribeToAll"/> subscribes to.
+    /// </summary>
     private const int MaximumSubscribeAll = 500;
 
+    /// <summary>
+    /// Authenticates a new connection, pins its caller, and joins it to the user's own group.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <remarks>
+    /// A connection whose user or tenant cannot be resolved is aborted. The tenant is resolved once here and pinned to
+    /// the connection, so later hub calls never re-derive it.
+    /// </remarks>
     public override async Task OnConnectedAsync()
     {
         // Tenant resolvers written for HTTP (headers, subdomain, route) read IHttpContextAccessor, which SignalR does not
@@ -70,6 +104,11 @@ internal sealed class SogaHub(
         await base.OnConnectedAsync();
     }
 
+    /// <summary>
+    /// Cleans up after a connection closes: forgets it, stops its typing indicators, and starts the presence grace period.
+    /// </summary>
+    /// <param name="exception">The error that closed the connection, or <see langword="null"/> for a normal close.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         if (Context.Items.TryGetValue(CallerKey, out var value) && value is SogaCaller caller)
@@ -94,7 +133,16 @@ internal sealed class SogaHub(
         await base.OnDisconnectedAsync(exception);
     }
 
-    /// <summary>Confirms the client and server speak the same protocol version. Throws <c>soga.protocol.mismatch</c> otherwise.</summary>
+    /// <summary>
+    /// Confirms that the client and server use the same protocol version.
+    /// </summary>
+    /// <param name="clientVersion">The protocol version the client implements.</param>
+    /// <returns>The server's protocol version, which equals <paramref name="clientVersion"/>.</returns>
+    /// <exception cref="HubException">The versions differ. The message is <c>soga.protocol.mismatch</c>.</exception>
+    /// <remarks>
+    /// Clients should call this first after connecting. It is answered only once connection setup has finished, so it
+    /// also tells the client that the connection is ready to subscribe.
+    /// </remarks>
 #pragma warning disable CA1822 // SignalR only discovers instance methods as hub methods.
     public int NegotiateProtocol(int clientVersion) =>
 #pragma warning restore CA1822
@@ -102,7 +150,16 @@ internal sealed class SogaHub(
             ? SogaProtocol.Version
             : throw new HubException(SogaErrorCodes.ProtocolMismatch);
 
-    /// <summary>Subscribes this connection to a conversation after re-checking access. Call it again after every reconnect.</summary>
+    /// <summary>
+    /// Subscribes this connection to a conversation's events after checking access.
+    /// </summary>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <exception cref="HubException">
+    /// The caller is not a participant (<c>soga.conversation.not_found</c>) or a host policy denies it
+    /// (<c>soga.authorization.denied</c>).
+    /// </exception>
+    /// <remarks>Subscriptions do not survive a reconnect. Subscribe again, or call <see cref="SubscribeToAll"/>.</remarks>
     public async Task SubscribeToConversation(Guid conversationId)
     {
         var caller = GetCaller();
@@ -120,9 +177,16 @@ internal sealed class SogaHub(
     }
 
     /// <summary>
-    /// Subscribes to every conversation the user can currently access (up to 500, most recent first) and returns their IDs.
-    /// Use it after a reconnect: only still-authorized subscriptions are restored.
+    /// Subscribes this connection to every conversation the caller can currently access.
     /// </summary>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the IDs of the conversations
+    /// subscribed to, up to 500, most recent activity first.
+    /// </returns>
+    /// <remarks>
+    /// Use this after a reconnect. Only subscriptions the caller is still authorized for are restored, so a user removed
+    /// while offline does not regain access.
+    /// </remarks>
     public async Task<IReadOnlyList<Guid>> SubscribeToAll()
     {
         var caller = GetCaller();
@@ -149,7 +213,11 @@ internal sealed class SogaHub(
         return subscribed;
     }
 
-    /// <summary>Removes this connection from a conversation group.</summary>
+    /// <summary>
+    /// Stops this connection from receiving a conversation's events.
+    /// </summary>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task UnsubscribeFromConversation(Guid conversationId)
     {
         var caller = GetCaller();
@@ -161,9 +229,17 @@ internal sealed class SogaHub(
     }
 
     /// <summary>
-    /// Says the caller is (or is no longer) typing in a conversation. Repeat it while typing: it expires on its own after
-    /// <c>Typing:Timeout</c>, and broadcasts are throttled. No text is ever sent.
+    /// Tells the other participants that the caller started or stopped typing in a conversation.
     /// </summary>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <param name="typingNow"><see langword="true"/> while typing; <see langword="false"/> to stop.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <exception cref="HubException">The caller is not a participant, or a host policy denies it.</exception>
+    /// <remarks>
+    /// Call this repeatedly while the user types. The indicator expires on its own after
+    /// <see cref="SogaTypingOptions.Timeout"/>, broadcasts are throttled, and no text is ever sent. The call does
+    /// nothing when typing indicators are disabled.
+    /// </remarks>
     public async Task SetTyping(Guid conversationId, bool typingNow)
     {
         var settings = options.Value.Typing;
@@ -192,7 +268,16 @@ internal sealed class SogaHub(
         }
     }
 
-    /// <summary>Returns who in a conversation is online. Advisory only: presence never grants or removes access.</summary>
+    /// <summary>
+    /// Gets which participants of a conversation are online.
+    /// </summary>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains one entry per participant, or is
+    /// empty when presence is disabled.
+    /// </returns>
+    /// <exception cref="HubException">The caller is not a participant, or a host policy denies it.</exception>
+    /// <remarks>Presence is advisory only: it never grants or removes access.</remarks>
     public async Task<IReadOnlyList<PresenceResponse>> GetPresence(Guid conversationId)
     {
         var settings = options.Value.Presence;
@@ -223,18 +308,41 @@ internal sealed class SogaHub(
         return [.. known.Select(p => new PresenceResponse(p.UserId, p.Online, settings.ExposeLastSeen ? p.LastSeenAt : null))];
     }
 
+    /// <summary>
+    /// Gets the caller pinned to this connection by <see cref="OnConnectedAsync"/>.
+    /// </summary>
+    /// <returns>The trusted caller.</returns>
+    /// <exception cref="HubException">The connection has no caller. The message is <c>soga.auth.unauthorized</c>.</exception>
     private SogaCaller GetCaller() =>
         Context.Items.TryGetValue(CallerKey, out var value) && value is SogaCaller caller
             ? caller
             : throw new HubException(SogaErrorCodes.Unauthorized);
 }
 
-/// <summary>SignalR group names. They include the tenant so groups from different tenants can never collide.</summary>
+/// <summary>
+/// Builds the SignalR group names Soga uses.
+/// </summary>
+/// <remarks>
+/// Names include the tenant, length-prefixed, so groups from different tenants can never collide whatever characters
+/// the IDs contain.
+/// </remarks>
 internal static class SogaGroups
 {
+    /// <summary>
+    /// Gets the name of the group that receives a conversation's events.
+    /// </summary>
+    /// <param name="tenantId">The tenant of the conversation.</param>
+    /// <param name="conversationId">The ID of the conversation.</param>
+    /// <returns>The group name.</returns>
     public static string Conversation(string tenantId, Guid conversationId) =>
         $"soga:{tenantId.Length}:{tenantId}:c:{conversationId:N}";
 
+    /// <summary>
+    /// Gets the name of the group that receives one user's personal events, on every device.
+    /// </summary>
+    /// <param name="tenantId">The tenant of the user.</param>
+    /// <param name="userId">The ID of the user.</param>
+    /// <returns>The group name.</returns>
     public static string User(string tenantId, string userId) =>
         $"soga:{tenantId.Length}:{tenantId}:u:{userId}";
 }

@@ -2,7 +2,13 @@ using System.Text.Json;
 
 namespace Soga.Contracts;
 
-/// <summary>Protocol constants.</summary>
+/// <summary>
+/// Provides constants that describe the Soga wire protocol.
+/// </summary>
+/// <remarks>
+/// Every request, response, and event in this namespace is part of the protocol. Changes within a version are
+/// additive only, so clients must ignore fields, event types, and error codes they do not recognize (ADR 0010).
+/// </remarks>
 public static class SogaProtocol
 {
     /// <summary>The current wire protocol version.</summary>

@@ -7,27 +7,38 @@ using Soga.EntityFrameworkCore.Entities;
 
 namespace Soga.EntityFrameworkCore.Extensions;
 
-/// <summary>Adds Soga persistence mappings to a host-owned EF Core model.</summary>
+/// <summary>
+/// Provides extension methods for adding the Soga tables to a host-owned Entity Framework Core model.
+/// </summary>
 public static class SogaModelBuilderExtensions
 {
+    /// <summary>
+    /// Compares identity values ordinally (case-sensitively) inside Entity Framework Core's change tracker.
+    /// </summary>
     private static readonly ValueComparer<string> OrdinalIdentityComparer = new(
         (left, right) => string.Equals(left, right, StringComparison.Ordinal),
         value => value.GetHashCode(StringComparison.Ordinal),
         value => value);
 
     /// <summary>
-    /// Registers the Soga tables and constraints. Call it from the host <c>DbContext.OnModelCreating</c>; the host
-    /// owns migrations and Soga never migrates a database on its own (ADR 0004, ADR 0005).
+    /// Adds the Soga tables, keys, indexes, and constraints to the model.
     /// </summary>
     /// <param name="modelBuilder">The host model builder.</param>
-    /// <param name="schema">An optional database schema.</param>
-    /// <param name="tablePrefix">The prefix of every Soga table. Defaults to <c>Soga</c>.</param>
+    /// <param name="schema">An optional database schema for the Soga tables.</param>
+    /// <param name="tablePrefix">The prefix of every Soga table name. Defaults to <c>Soga</c>.</param>
     /// <param name="identityCollation">
     /// A case-sensitive collation applied to every identity column (tenant, user, and client message IDs). Soga compares
     /// identities ordinally, so <c>Alice</c> and <c>alice</c> are different users. PostgreSQL and SQLite already behave this way.
     /// <b>SQL Server is case-insensitive by default and requires this</b>, for example <c>"Latin1_General_100_BIN2"</c>;
     /// Soga refuses to start on SQL Server without it, because otherwise two different users could share one identity.
     /// </param>
+    /// <returns>The same <paramref name="modelBuilder"/>, so further calls can be chained.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="modelBuilder"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="tablePrefix"/> is empty or whitespace.</exception>
+    /// <remarks>
+    /// Call this method from the host's <c>DbContext.OnModelCreating</c>. The host owns migrations; Soga never migrates
+    /// a database on its own (ADR 0004, ADR 0005). No table references the host's user table.
+    /// </remarks>
     public static ModelBuilder AddSoga(
         this ModelBuilder modelBuilder,
         string? schema = null,
@@ -158,7 +169,15 @@ public static class SogaModelBuilderExtensions
         return modelBuilder;
     }
 
-    // The relationship has no navigation properties: rows stay flat and tenant-scoped.
+    /// <summary>
+    /// Adds a foreign key from a Soga row to its conversation, on the composite tenant and conversation key.
+    /// </summary>
+    /// <typeparam name="TRow">The row type that has <c>TenantId</c> and <c>ConversationId</c> columns.</typeparam>
+    /// <param name="entity">The entity type builder of the row.</param>
+    /// <remarks>
+    /// The relationship has no navigation properties, so rows stay flat and tenant-scoped. Deletes are restricted so
+    /// history can never be removed by cascade.
+    /// </remarks>
     private static void ReferenceConversation<TRow>(EntityTypeBuilder<TRow> entity)
         where TRow : class
     {
@@ -170,9 +189,15 @@ public static class SogaModelBuilderExtensions
     }
 }
 
-/// <summary>Stores <see cref="DateTimeOffset"/> as a UTC <see cref="DateTime"/> so every provider can sort and compare it.</summary>
+/// <summary>
+/// Stores a <see cref="DateTimeOffset"/> as a UTC <see cref="DateTime"/>.
+/// </summary>
+/// <remarks>Not every provider can sort and compare <see cref="DateTimeOffset"/> values; every provider can sort UTC <see cref="DateTime"/> values.</remarks>
 internal sealed class UtcDateTimeConverter : ValueConverter<DateTimeOffset, DateTime>
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="UtcDateTimeConverter"/> class.
+    /// </summary>
     public UtcDateTimeConverter()
         : base(
             value => value.UtcDateTime,
@@ -181,8 +206,14 @@ internal sealed class UtcDateTimeConverter : ValueConverter<DateTimeOffset, Date
     }
 }
 
+/// <summary>
+/// Stores a nullable <see cref="DateTimeOffset"/> as a nullable UTC <see cref="DateTime"/>.
+/// </summary>
 internal sealed class NullableUtcDateTimeConverter : ValueConverter<DateTimeOffset?, DateTime?>
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="NullableUtcDateTimeConverter"/> class.
+    /// </summary>
     public NullableUtcDateTimeConverter()
         : base(
             value => value.HasValue ? value.Value.UtcDateTime : null,

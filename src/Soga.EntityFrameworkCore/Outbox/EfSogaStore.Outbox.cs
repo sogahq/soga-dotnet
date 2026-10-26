@@ -4,13 +4,17 @@ using Soga.Persistence;
 
 namespace Soga.EntityFrameworkCore.Repositories;
 
+/// <content>
+/// Contains the outbox operations used by the dispatcher and the health check.
+/// </content>
 internal sealed partial class EfSogaStore<TContext>
 {
-    /// <summary>
-    /// Claims due events without provider-specific locking. Candidates are read, then each is leased with a
-    /// conditional UPDATE that only succeeds while nobody else holds a live lease, so competing workers never
-    /// double-claim, and a crashed worker's lease simply expires (ADR 0009).
-    /// </summary>
+    /// <inheritdoc />
+    /// <remarks>
+    /// Claiming needs no provider-specific locking. Candidates are read, then each one is leased with a conditional
+    /// UPDATE that only succeeds while nobody else holds a live lease, so competing workers never claim the same event,
+    /// and a crashed worker's lease simply expires (ADR 0009).
+    /// </remarks>
     public async Task<IReadOnlyList<OutboxMessage>> ClaimOutboxAsync(
         DateTimeOffset now,
         int batchSize,
@@ -53,6 +57,7 @@ internal sealed partial class EfSogaStore<TContext>
         return claimed;
     }
 
+    /// <inheritdoc />
     public async Task CompleteOutboxAsync(OutboxMessage message, DateTimeOffset now, CancellationToken cancellationToken) =>
         await _db.Set<OutboxRow>()
             .Where(o => o.TenantId == message.TenantId && o.Id == message.Id)
@@ -60,6 +65,8 @@ internal sealed partial class EfSogaStore<TContext>
                 s => s.SetProperty(o => o.PublishedAt, now).SetProperty(o => o.LeaseUntil, (DateTimeOffset?)null),
                 cancellationToken);
 
+    /// <inheritdoc />
+    /// <remarks>The failure code is cut to 200 characters to fit the column.</remarks>
     public async Task FailOutboxAsync(
         OutboxMessage message,
         DateTimeOffset? retryAt,
@@ -88,11 +95,13 @@ internal sealed partial class EfSogaStore<TContext>
         }
     }
 
+    /// <inheritdoc />
     public async Task<int> PurgeOutboxAsync(DateTimeOffset publishedBefore, CancellationToken cancellationToken) =>
         await _db.Set<OutboxRow>()
             .Where(o => o.PublishedAt != null && o.PublishedAt < publishedBefore)
             .ExecuteDeleteAsync(cancellationToken);
 
+    /// <inheritdoc />
     public async Task<OutboxStats> GetOutboxStatsAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         var pending = _db.Set<OutboxRow>().AsNoTracking().Where(o => o.PublishedAt == null && o.FailedAt == null);

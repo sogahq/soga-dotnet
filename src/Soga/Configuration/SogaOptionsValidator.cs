@@ -2,8 +2,25 @@ using Microsoft.Extensions.Options;
 
 namespace Soga.Configuration;
 
+/// <summary>
+/// Validates <see cref="SogaOptions"/> when the application starts.
+/// </summary>
+/// <remarks>
+/// Every rule is checked and every failure is reported together, so a misconfigured host fails fast with one complete
+/// list of problems instead of one error per restart. Messages name the configuration key, for example
+/// <c>Soga:Messages:MaximumTextLength</c>, so they can be fixed directly in <c>appsettings.json</c>.
+/// </remarks>
 internal sealed class SogaOptionsValidator : IValidateOptions<SogaOptions>
 {
+    /// <summary>
+    /// Validates a <see cref="SogaOptions"/> instance.
+    /// </summary>
+    /// <param name="name">The name of the options instance being validated. Soga uses unnamed options.</param>
+    /// <param name="options">The options to validate.</param>
+    /// <returns>
+    /// <see cref="ValidateOptionsResult.Success"/> when every rule passes; otherwise, a failed result listing every
+    /// broken rule.
+    /// </returns>
     public ValidateOptionsResult Validate(string? name, SogaOptions options)
     {
         var failures = new List<string>();
@@ -110,6 +127,15 @@ internal sealed class SogaOptionsValidator : IValidateOptions<SogaOptions>
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
 
+    /// <summary>
+    /// Checks that a default page size is at least 1, does not exceed its maximum, and that the maximum is at most 500.
+    /// </summary>
+    /// <param name="section">The configuration section being validated, such as <c>Soga:Messages</c>.</param>
+    /// <param name="defaultSize">The configured default page size.</param>
+    /// <param name="maximumSize">The configured maximum page size.</param>
+    /// <param name="failures">The list that receives a failure message when the rule is broken.</param>
+    /// <param name="defaultName">The name of the default-size setting, used in the failure message.</param>
+    /// <param name="maximumName">The name of the maximum-size setting, used in the failure message.</param>
     private static void ValidatePaging(
         string section,
         int defaultSize,

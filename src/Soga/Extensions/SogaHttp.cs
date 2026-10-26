@@ -9,14 +9,33 @@ using Soga.Identity;
 
 namespace Soga.Extensions;
 
-/// <summary>Shared HTTP plumbing: caller resolution, bounded body reading, and Problem Details mapping.</summary>
+/// <summary>
+/// Provides the HTTP plumbing shared by every Soga endpoint: caller resolution, bounded body reading, query parsing,
+/// and mapping of <see cref="SogaError"/> values to Problem Details responses.
+/// </summary>
 internal static class SogaHttp
 {
+    /// <summary>
+    /// The JSON options used to read request bodies, which use ASP.NET Core web defaults (camelCase, case-insensitive).
+    /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// The error returned when a request body exceeds <see cref="SogaSecurityOptions.MaximumRequestBodyBytes"/>
+    /// (HTTP 413).
+    /// </summary>
     private static readonly SogaError BodyTooLarge =
         new(SogaErrorCodes.InvalidRequest, StatusCodes.Status413PayloadTooLarge, "Request body is too large");
 
+    /// <summary>
+    /// Creates a Problem Details response for a Soga error.
+    /// </summary>
+    /// <param name="http">The current HTTP context, used for the trace ID.</param>
+    /// <param name="error">The error to describe.</param>
+    /// <returns>
+    /// An <see cref="IResult"/> that writes the error's status code, title, and detail, a <c>type</c> of
+    /// <c>urn:soga:error:&lt;code&gt;</c>, and <c>code</c> and <c>traceId</c> extension members.
+    /// </returns>
     public static IResult Problem(HttpContext http, SogaError error)
     {
         var extensions = new Dictionary<string, object?>
@@ -33,7 +52,17 @@ internal static class SogaHttp
             extensions: extensions);
     }
 
-    /// <summary>Resolves the trusted caller, runs the workflow, and maps the result.</summary>
+    /// <summary>
+    /// Resolves the trusted caller, runs a workflow operation, and maps its result to an HTTP response.
+    /// </summary>
+    /// <typeparam name="T">The type of the value the workflow returns on success.</typeparam>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="action">The workflow operation to run for the resolved caller.</param>
+    /// <param name="onSuccess">Maps a successful value to the HTTP response.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is the success response, or a Problem
+    /// Details response when the caller cannot be resolved or the workflow fails.
+    /// </returns>
     public static async Task<IResult> RunAsync<T>(
         HttpContext http,
         Func<SogaCaller, CancellationToken, Task<SogaResult<T>>> action,
@@ -50,7 +79,20 @@ internal static class SogaHttp
         return result.IsSuccess ? onSuccess(result.Value) : Problem(http, result.Error!);
     }
 
-    /// <summary>Reads a JSON body without ever buffering more than the configured limit.</summary>
+    /// <summary>
+    /// Reads and deserializes a JSON request body without ever buffering more than the configured limit.
+    /// </summary>
+    /// <typeparam name="T">The request contract to deserialize.</typeparam>
+    /// <param name="http">The current HTTP context.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result contains the deserialized body, or fails
+    /// when the content type is not JSON, the body is larger than
+    /// <see cref="SogaSecurityOptions.MaximumRequestBodyBytes"/>, or the JSON is invalid.
+    /// </returns>
+    /// <remarks>
+    /// The <c>Content-Length</c> header is checked first, and the body is then read in chunks so that a client that
+    /// sends no header, or a false one, still cannot make the server buffer an oversized body.
+    /// </remarks>
     public static async Task<SogaResult<T?>> ReadBodyAsync<T>(HttpContext http)
         where T : class
     {
@@ -89,7 +131,17 @@ internal static class SogaHttp
         }
     }
 
-    /// <summary>Parses the optional <c>limit</c> query value. Returns <see langword="false"/> when it is present but not an integer.</summary>
+    /// <summary>
+    /// Parses the optional <c>limit</c> query string value.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="limit">
+    /// When this method returns, contains the parsed limit, or <see langword="null"/> when the value is absent.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> if the value is absent or a non-negative integer; <see langword="false"/> if it is present
+    /// but not a valid integer.
+    /// </returns>
     public static bool TryGetLimit(HttpContext http, out int? limit)
     {
         limit = null;
@@ -108,6 +160,11 @@ internal static class SogaHttp
         return false;
     }
 
+    /// <summary>
+    /// Gets the optional <c>cursor</c> query string value.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <returns>The opaque cursor, or <see langword="null"/> when the value is absent or empty.</returns>
     public static string? GetCursor(HttpContext http)
     {
         var raw = http.Request.Query["cursor"].ToString();

@@ -2,7 +2,13 @@ using System.Security.Claims;
 
 namespace Soga.Configuration;
 
-/// <summary>Configures the public Soga protocol surface.</summary>
+/// <summary>
+/// Provides the configuration for Soga.
+/// </summary>
+/// <remarks>
+/// Options are bound from the <c>Soga</c> configuration section and can be changed in code through the delegate
+/// passed to <c>AddSoga</c>. They are validated when the application starts, and an invalid value stops the host.
+/// </remarks>
 public sealed class SogaOptions
 {
     /// <summary>The configuration section consumed by Soga.</summary>

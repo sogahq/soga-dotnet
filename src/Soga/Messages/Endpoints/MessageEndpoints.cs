@@ -7,8 +7,18 @@ using Soga.Extensions;
 
 namespace Soga.Messages.Endpoints;
 
+/// <summary>
+/// Maps the HTTP endpoints for reading, sending, editing, and deleting messages.
+/// </summary>
+/// <remarks>
+/// Endpoints only translate HTTP to workflow calls. Validation and authorization live in <see cref="MessageWorkflow"/>.
+/// </remarks>
 internal static class MessageEndpoints
 {
+    /// <summary>
+    /// Adds the message endpoints to the Soga route group.
+    /// </summary>
+    /// <param name="group">The Soga route group created by <see cref="SogaEndpointRouteBuilderExtensions.MapSoga"/>.</param>
     public static void Map(RouteGroupBuilder group)
     {
         group.MapGet("/conversations/{id:guid}/messages", GetHistoryAsync)
@@ -42,6 +52,13 @@ internal static class MessageEndpoints
             .ProducesProblem(StatusCodes.Status403Forbidden);
     }
 
+    /// <summary>
+    /// Handles <c>GET /conversations/{id}/messages</c>, reading the <c>limit</c> and <c>cursor</c> query values.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The conversation ID from the route.</param>
+    /// <param name="workflow">The message workflow.</param>
+    /// <returns>A task whose result is one page of messages, newest first.</returns>
     private static Task<IResult> GetHistoryAsync(HttpContext http, Guid id, MessageWorkflow workflow)
     {
         if (!SogaHttp.TryGetLimit(http, out var limit))
@@ -56,6 +73,16 @@ internal static class MessageEndpoints
             page => Results.Ok(page));
     }
 
+    /// <summary>
+    /// Handles <c>POST /conversations/{id}/messages</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The conversation ID from the route.</param>
+    /// <param name="workflow">The message workflow.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is 201 for a new message, or 200 with the
+    /// stored message for an idempotent retry.
+    /// </returns>
     private static async Task<IResult> SendAsync(HttpContext http, Guid id, MessageWorkflow workflow)
     {
         var body = await SogaHttp.ReadBodyAsync<SendMessageRequest>(http);
@@ -73,6 +100,14 @@ internal static class MessageEndpoints
                 : Results.Ok(result.Value));
     }
 
+    /// <summary>
+    /// Handles <c>PATCH /conversations/{id}/messages/{messageId}</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The conversation ID from the route.</param>
+    /// <param name="messageId">The ID of the message to edit.</param>
+    /// <param name="workflow">The message workflow.</param>
+    /// <returns>A task whose result is the edited message.</returns>
     private static async Task<IResult> EditAsync(HttpContext http, Guid id, Guid messageId, MessageWorkflow workflow)
     {
         var body = await SogaHttp.ReadBodyAsync<EditMessageRequest>(http);
@@ -88,6 +123,14 @@ internal static class MessageEndpoints
             message => Results.Ok(message));
     }
 
+    /// <summary>
+    /// Handles <c>DELETE /conversations/{id}/messages/{messageId}</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The conversation ID from the route.</param>
+    /// <param name="messageId">The ID of the message to delete.</param>
+    /// <param name="workflow">The message workflow.</param>
+    /// <returns>A task whose result is 204 when the message is deleted or was already deleted.</returns>
     private static Task<IResult> DeleteAsync(HttpContext http, Guid id, Guid messageId, MessageWorkflow workflow) =>
         SogaHttp.RunAsync(
             http,

@@ -9,8 +9,19 @@ using Soga.Extensions;
 
 namespace Soga.Groups.Endpoints;
 
+/// <summary>
+/// Maps the HTTP endpoints for creating and managing group conversations and their participants.
+/// </summary>
+/// <remarks>
+/// Endpoints only translate HTTP to workflow calls. Role checks and validation live in <see cref="GroupWorkflow"/>
+/// and <see cref="GroupRules"/>.
+/// </remarks>
 internal static class GroupEndpoints
 {
+    /// <summary>
+    /// Adds the group endpoints to the Soga route group.
+    /// </summary>
+    /// <param name="group">The Soga route group created by <see cref="SogaEndpointRouteBuilderExtensions.MapSoga"/>.</param>
     public static void Map(RouteGroupBuilder group)
     {
         group.MapPost("/conversations/groups", CreateAsync)
@@ -59,6 +70,13 @@ internal static class GroupEndpoints
             .Produces<ConversationResponse>();
     }
 
+    /// <summary>
+    /// Handles <c>POST /conversations/groups</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="workflow">The group workflow.</param>
+    /// <param name="options">The Soga options, used to build the <c>Location</c> header.</param>
+    /// <returns>A task whose result is 201 with the new group and a <c>Location</c> header.</returns>
     private static async Task<IResult> CreateAsync(
         HttpContext http,
         GroupWorkflow workflow,
@@ -79,6 +97,13 @@ internal static class GroupEndpoints
                 conversation));
     }
 
+    /// <summary>
+    /// Handles <c>PATCH /conversations/{id}</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The group ID from the route.</param>
+    /// <param name="workflow">The group workflow.</param>
+    /// <returns>A task whose result is the updated group.</returns>
     private static async Task<IResult> UpdateAsync(HttpContext http, Guid id, GroupWorkflow workflow)
     {
         var body = await SogaHttp.ReadBodyAsync<UpdateConversationRequest>(http);
@@ -91,6 +116,13 @@ internal static class GroupEndpoints
         return await Run(http, (caller, ct) => workflow.UpdateAsync(caller, id, request, ct));
     }
 
+    /// <summary>
+    /// Handles <c>POST /conversations/{id}/participants</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The group ID from the route.</param>
+    /// <param name="workflow">The group workflow.</param>
+    /// <returns>A task whose result is the group with its updated participants.</returns>
     private static async Task<IResult> AddParticipantAsync(HttpContext http, Guid id, GroupWorkflow workflow)
     {
         var body = await SogaHttp.ReadBodyAsync<AddParticipantRequest>(http);
@@ -103,6 +135,14 @@ internal static class GroupEndpoints
         return await Run(http, (caller, ct) => workflow.AddParticipantAsync(caller, id, request, ct));
     }
 
+    /// <summary>
+    /// Handles <c>PUT /conversations/{id}/participants/{userId}/role</c>.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="id">The group ID from the route.</param>
+    /// <param name="userId">The ID of the participant whose role changes.</param>
+    /// <param name="workflow">The group workflow.</param>
+    /// <returns>A task whose result is the group with its updated participants.</returns>
     private static async Task<IResult> ChangeRoleAsync(HttpContext http, Guid id, string userId, GroupWorkflow workflow)
     {
         var body = await SogaHttp.ReadBodyAsync<ChangeRoleRequest>(http);
@@ -115,7 +155,15 @@ internal static class GroupEndpoints
         return await Run(http, (caller, ct) => workflow.ChangeRoleAsync(caller, id, userId, request, ct));
     }
 
-    /// <summary>A group change returns the conversation, or 204 when the caller just lost access to it.</summary>
+    /// <summary>
+    /// Runs a group change and maps its result to an HTTP response.
+    /// </summary>
+    /// <param name="http">The current HTTP context.</param>
+    /// <param name="action">The group workflow operation to run.</param>
+    /// <returns>
+    /// A task whose result is 200 with the updated group, or 204 when the change removed the caller's own access, for
+    /// example when they left the group.
+    /// </returns>
     private static Task<IResult> Run(
         HttpContext http,
         Func<Identity.SogaCaller, CancellationToken, Task<SogaResult<ConversationResponse?>>> action) =>

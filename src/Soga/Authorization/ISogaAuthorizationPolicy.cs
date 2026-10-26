@@ -1,6 +1,8 @@
 namespace Soga.Authorization;
 
-/// <summary>The protected operations a host policy can evaluate.</summary>
+/// <summary>
+/// Specifies the protected operations a host <see cref="ISogaAuthorizationPolicy"/> can evaluate.
+/// </summary>
 public enum SogaAction
 {
     /// <summary>Opening or retrieving a direct conversation.</summary>
@@ -43,8 +45,10 @@ public enum SogaAction
     ViewPresence,
 }
 
-/// <summary>What a host policy is asked to decide.</summary>
-/// <param name="Action">The operation.</param>
+/// <summary>
+/// Describes the operation a host <see cref="ISogaAuthorizationPolicy"/> is asked to decide.
+/// </summary>
+/// <param name="Action">The operation being attempted.</param>
 /// <param name="TenantId">The trusted tenant. A policy can neither change nor cross it.</param>
 /// <param name="UserId">The acting user.</param>
 /// <param name="ConversationId">The conversation, when the operation has one.</param>
@@ -63,16 +67,29 @@ public sealed record SogaAuthorizationContext(
     Guid? MessageId = null);
 
 /// <summary>
-/// A host rule that can further restrict what Soga allows, for example "only the buyer and seller of an order may talk
-/// about it". Soga always applies its own membership and role checks first; a policy runs afterwards and can only
-/// <b>deny</b>. It can never grant access Soga would refuse, and it can never cross the tenant boundary.
+/// Defines a host rule that further restricts what Soga allows, for example "only the buyer and seller of an order may
+/// talk about it" (ADR 0014).
 /// </summary>
 /// <remarks>
-/// The same policies run for HTTP and SignalR. A policy that throws denies the operation. Register any number with
-/// <c>services.AddSingleton&lt;ISogaAuthorizationPolicy, MyPolicy&gt;()</c>; all must allow.
+/// <para>
+/// Soga always applies its own membership and role checks first. A policy runs afterwards and can only <b>deny</b>: it
+/// can never grant access Soga would refuse, and it can never cross the tenant boundary.
+/// </para>
+/// <para>
+/// The same policies run for HTTP and SignalR. A policy that throws denies the operation. Register any number of
+/// policies with <c>services.AddSingleton&lt;ISogaAuthorizationPolicy, MyPolicy&gt;()</c>; every one must allow.
+/// </para>
 /// </remarks>
 public interface ISogaAuthorizationPolicy
 {
-    /// <summary>Returns <see langword="true"/> to allow the operation to continue, or <see langword="false"/> to deny it.</summary>
+    /// <summary>
+    /// Decides whether an operation may continue.
+    /// </summary>
+    /// <param name="context">The operation, the acting user, and what is known about the conversation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
+    /// <returns>
+    /// A task that represents the asynchronous operation. The task result is <see langword="true"/> to allow the
+    /// operation to continue, or <see langword="false"/> to deny it with <c>soga.authorization.denied</c>.
+    /// </returns>
     ValueTask<bool> IsAllowedAsync(SogaAuthorizationContext context, CancellationToken cancellationToken);
 }

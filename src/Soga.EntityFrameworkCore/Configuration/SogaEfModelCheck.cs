@@ -8,12 +8,29 @@ using Soga.EntityFrameworkCore.Entities;
 
 namespace Soga.EntityFrameworkCore.Configuration;
 
-/// <summary>Verifies the host model is safe for Soga before any data is touched.</summary>
+/// <summary>
+/// Verifies that the host's Entity Framework Core model is safe for Soga before any data is read or written.
+/// </summary>
 internal static class SogaEfModelCheck
 {
-    // The runtime model is built once per context configuration, so one check per model instance is enough.
+    /// <summary>
+    /// The runtime models that have already passed the check.
+    /// </summary>
+    /// <remarks>
+    /// The runtime model is built once per context configuration, so one check per model instance is enough. A weak
+    /// table lets a discarded model be garbage collected.
+    /// </remarks>
     private static readonly ConditionalWeakTable<IModel, object> Verified = [];
 
+    /// <summary>
+    /// Validates the model of a context.
+    /// </summary>
+    /// <param name="db">The host context to validate.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="db"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The model does not include the Soga tables, or the provider is SQL Server and the identity columns have no
+    /// case-sensitive collation.
+    /// </exception>
     public static void Validate(DbContext db)
     {
         ArgumentNullException.ThrowIfNull(db);
@@ -49,10 +66,16 @@ internal static class SogaEfModelCheck
     }
 }
 
-/// <summary>Runs <see cref="SogaEfModelCheck"/> when the application starts, so a misconfigured model fails fast instead of on the first request.</summary>
+/// <summary>
+/// A hosted service that runs <see cref="SogaEfModelCheck"/> when the application starts.
+/// </summary>
+/// <typeparam name="TContext">The host database context.</typeparam>
+/// <param name="scopes">Creates the scope used to resolve the context.</param>
+/// <remarks>A misconfigured model stops the application at startup instead of failing on the first request.</remarks>
 internal sealed class SogaEfStartupCheck<TContext>(IServiceScopeFactory scopes) : IHostedService
     where TContext : DbContext
 {
+    /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
     {
         using var scope = scopes.CreateScope();
@@ -60,5 +83,6 @@ internal sealed class SogaEfStartupCheck<TContext>(IServiceScopeFactory scopes) 
         return Task.CompletedTask;
     }
 
+    /// <inheritdoc />
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

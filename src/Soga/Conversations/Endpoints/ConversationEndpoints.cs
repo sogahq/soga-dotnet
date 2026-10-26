@@ -23,12 +23,12 @@ internal static class ConversationEndpoints
 
         group.MapGet("/conversations", ListAsync)
             .WithName("SogaListConversations")
-            .WithSummary("Lists the caller's conversations with unread counts, most recent activity first.")
-            .Produces<IReadOnlyList<ConversationResponse>>();
+            .WithSummary("Lists the caller's conversations, most recent activity first, with unread counts and a last-message preview. Filters: kind=direct|group, state=active|archived|all, externalReference. Page with cursor.")
+            .Produces<ConversationPageResponse>();
 
         group.MapGet("/conversations/{id:guid}", GetAsync)
             .WithName("SogaGetConversation")
-            .WithSummary("Gets one conversation the caller participates in.")
+            .WithSummary("Gets one conversation the caller participates in, including its participants and roles.")
             .Produces<ConversationResponse>()
             .ProducesProblem(StatusCodes.Status404NotFound);
     }
@@ -62,10 +62,17 @@ internal static class ConversationEndpoints
             return Task.FromResult(SogaHttp.Problem(http, SogaErrors.InvalidRequest("limit must be an integer.")));
         }
 
+        var request = new ConversationListRequest(
+            limit,
+            SogaHttp.GetCursor(http),
+            Query(http, "kind"),
+            Query(http, "state"),
+            Query(http, "externalReference"));
+
         return SogaHttp.RunAsync(
             http,
-            (caller, ct) => workflow.ListAsync(caller, limit, ct),
-            conversations => Results.Ok(conversations));
+            (caller, ct) => workflow.ListAsync(caller, request, ct),
+            page => Results.Ok(page));
     }
 
     private static Task<IResult> GetAsync(HttpContext http, Guid id, ConversationWorkflow workflow) =>
@@ -73,4 +80,10 @@ internal static class ConversationEndpoints
             http,
             (caller, ct) => workflow.GetAsync(caller, id, ct),
             conversation => Results.Ok(conversation));
+
+    private static string? Query(HttpContext http, string name)
+    {
+        var value = http.Request.Query[name].ToString();
+        return value.Length == 0 ? null : value;
+    }
 }

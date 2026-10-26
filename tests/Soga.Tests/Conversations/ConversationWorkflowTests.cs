@@ -132,9 +132,10 @@ public sealed class ConversationWorkflowTests
         var withBob = (await conversations.CreateDirectAsync(TestSoga.Alice, new("bob"), default)).Value.Value;
         var withCarol = (await conversations.CreateDirectAsync(TestSoga.Alice, new("carol"), default)).Value.Value;
         await conversations.CreateDirectAsync(TestSoga.Bob, new("carol"), default);
+        soga.Clock.Advance(TimeSpan.FromMinutes(1));
         await messages.SendAsync(TestSoga.Alice, withBob.Id, new("c1", "hi"), default);
 
-        var list = (await conversations.ListAsync(TestSoga.Alice, null, default)).Value;
+        var list = (await conversations.ListAsync(TestSoga.Alice, new ConversationListRequest(), default)).Value.Items;
 
         Assert.Equal([withBob.Id, withCarol.Id], list.Select(c => c.Id));
     }
@@ -153,10 +154,10 @@ public sealed class ConversationWorkflowTests
             await workflow.CreateDirectAsync(TestSoga.Alice, new(user), default);
         }
 
-        var invalid = await workflow.ListAsync(TestSoga.Alice, 0, default);
-        var clamped = await workflow.ListAsync(TestSoga.Alice, 100, default);
+        var invalid = await workflow.ListAsync(TestSoga.Alice, new ConversationListRequest(Limit: 0), default);
+        var clamped = await workflow.ListAsync(TestSoga.Alice, new ConversationListRequest(Limit: 100), default);
 
         Assert.Equal(SogaErrorCodes.InvalidRequest, invalid.Error?.Code);
-        Assert.Equal(2, clamped.Value.Count);
+        Assert.Equal(2, clamped.Value.Items.Count);
     }
 }

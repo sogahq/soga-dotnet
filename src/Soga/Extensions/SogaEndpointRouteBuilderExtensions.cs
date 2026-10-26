@@ -9,6 +9,7 @@ using Soga.Configuration;
 using Soga.Conversations.Endpoints;
 using Soga.Diagnostics;
 using Soga.Errors;
+using Soga.Groups.Endpoints;
 using Soga.Identity;
 using Soga.Messages.Endpoints;
 using Soga.ReadState.Endpoints;
@@ -40,6 +41,7 @@ public static class SogaEndpointRouteBuilderExtensions
         group.AddEndpointFilter(HandleUnexpectedErrorsAsync);
 
         ConversationEndpoints.Map(group);
+        GroupEndpoints.Map(group);
         MessageEndpoints.Map(group);
         ReadStateEndpoints.Map(group);
         SyncEndpoints.Map(group);

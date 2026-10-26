@@ -29,7 +29,7 @@ public sealed class ProtocolFixtureTests
         Assert.Equal(
             "{\"id\":\"018f0000-0000-7000-8000-000000000001\",\"conversationId\":\"018f0000-0000-7000-8000-000000000002\"," +
             "\"sequence\":3,\"senderId\":\"alice\",\"clientMessageId\":\"client-1\",\"kind\":\"Text\",\"content\":\"hello\"," +
-            "\"createdAt\":\"2026-09-18T10:30:00+00:00\"}",
+            "\"createdAt\":\"2026-09-18T10:30:00+00:00\",\"editedAt\":null,\"deleted\":false,\"replyTo\":null}",
             Serialize(Message));
     }
 
@@ -69,7 +69,7 @@ public sealed class ProtocolFixtureTests
             "{\"eventId\":\"018f0000-0000-7000-8000-000000000003\",\"protocolVersion\":1,\"type\":\"ConversationCreated\"," +
             "\"occurredAt\":\"2026-09-18T10:30:00+00:00\",\"conversationId\":\"018f0000-0000-7000-8000-000000000002\"," +
             "\"sequence\":null,\"data\":{\"participantUserIds\":[\"alice\",\"bob\"],\"externalReference\":\"order:1\"," +
-            "\"createdAt\":\"2026-09-18T10:30:00\\u002B00:00\"}}",
+            EscapedInsideEventData("\"createdAt\":\"2026-09-18T10:30:00+00:00\",\"kind\":\"Direct\",\"title\":null}}"),
             Serialize(evt));
     }
 

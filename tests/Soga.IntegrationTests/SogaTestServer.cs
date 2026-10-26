@@ -25,6 +25,7 @@ internal sealed class SogaTestServer : IAsyncDisposable
     public const string UserHeader = "X-Test-User";
     public const string TenantHeader = "X-Test-Tenant";
     public const string Prefix = "/soga/v1";
+    public const string DefaultTenant = "default";
 
     private readonly WebApplication _app;
 
@@ -182,9 +183,16 @@ internal sealed class EventInbox
     private static readonly string[] EventNames =
     [
         SogaEventTypes.MessageCreated,
+        SogaEventTypes.MessageUpdated,
+        SogaEventTypes.MessageDeleted,
         SogaEventTypes.ReadPositionChanged,
         SogaEventTypes.ConversationCreated,
+        SogaEventTypes.ConversationUpdated,
+        SogaEventTypes.ConversationArchived,
+        SogaEventTypes.ParticipantChanged,
         SogaEventTypes.ConversationAccessChanged,
+        SogaEventTypes.TypingChanged,
+        SogaEventTypes.PresenceChanged,
     ];
 
     private readonly Channel<SogaEvent> _events = Channel.CreateUnbounded<SogaEvent>();
@@ -210,18 +218,43 @@ internal sealed class EventInbox
         }
     }
 
-    /// <summary>Returns true when no event arrives within the quiet period.</summary>
-    public async Task<bool> StaysQuietAsync(TimeSpan quiet)
+    /// <summary>Returns true when no event (of the given type, if one is given) arrives within the quiet period.</summary>
+    public async Task<bool> StaysQuietAsync(TimeSpan quiet, string? ofType = null)
     {
         using var timeout = new CancellationTokenSource(quiet);
         try
         {
-            await _events.Reader.WaitToReadAsync(timeout.Token);
-            return false;
+            while (true)
+            {
+                var evt = await _events.Reader.ReadAsync(timeout.Token);
+                if (ofType is null || evt.Type == ofType)
+                {
+                    return false;
+                }
+            }
         }
         catch (OperationCanceledException)
         {
             return true;
         }
     }
+}
+
+internal static class GroupHttpExtensions
+{
+    public static async Task<ConversationResponse> CreateGroupAsync(this HttpClient client, string title, params string[] members)
+    {
+        var response = await client.PostAsJsonAsync($"{SogaTestServer.Prefix}/conversations/groups", new CreateGroupRequest(title, members));
+        response.EnsureSuccessStatusCode();
+        return await response.ReadAsync<ConversationResponse>();
+    }
+
+    public static Task<HttpResponseMessage> AddParticipantAsync(this HttpClient client, Guid conversationId, string userId, string? role = null) =>
+        client.PostAsJsonAsync($"{SogaTestServer.Prefix}/conversations/{conversationId}/participants", new AddParticipantRequest(userId, role));
+
+    public static Task<HttpResponseMessage> RemoveParticipantAsync(this HttpClient client, Guid conversationId, string userId) =>
+        client.DeleteAsync($"{SogaTestServer.Prefix}/conversations/{conversationId}/participants/{Uri.EscapeDataString(userId)}");
+
+    public static Task<HttpResponseMessage> ChangeRoleAsync(this HttpClient client, Guid conversationId, string userId, string role) =>
+        client.PutAsJsonAsync($"{SogaTestServer.Prefix}/conversations/{conversationId}/participants/{Uri.EscapeDataString(userId)}/role", new ChangeRoleRequest(role));
 }

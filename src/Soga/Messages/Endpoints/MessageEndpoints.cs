@@ -13,19 +13,33 @@ internal static class MessageEndpoints
     {
         group.MapGet("/conversations/{id:guid}/messages", GetHistoryAsync)
             .WithName("SogaGetMessages")
-            .WithSummary("Returns message history newest first. Pass the returned cursor to load older messages.")
+            .WithSummary("Returns message history newest first. Deleted messages appear as empty tombstones. Pass the returned cursor to load older messages.")
             .Produces<MessagePageResponse>()
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound);
 
         group.MapPost("/conversations/{id:guid}/messages", SendAsync)
             .WithName("SogaSendMessage")
-            .WithSummary("Sends a text message. Retrying with the same clientMessageId returns the stored message with 200.")
+            .WithSummary("Sends a text message, optionally as a reply. Retrying with the same clientMessageId returns the stored message with 200.")
             .Accepts<SendMessageRequest>("application/json")
             .Produces<MessageResponse>(StatusCodes.Status201Created)
             .Produces<MessageResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status409Conflict)
             .ProducesProblem(StatusCodes.Status422UnprocessableEntity);
+
+        group.MapPatch("/conversations/{id:guid}/messages/{messageId:guid}", EditAsync)
+            .WithName("SogaEditMessage")
+            .WithSummary("Edits the text of the caller's own message within the edit window. Sequence and sender never change.")
+            .Accepts<EditMessageRequest>("application/json")
+            .Produces<MessageResponse>()
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+
+        group.MapDelete("/conversations/{id:guid}/messages/{messageId:guid}", DeleteAsync)
+            .WithName("SogaDeleteMessage")
+            .WithSummary("Deletes a message. The sender may delete their own; in a group an owner or admin may delete others'. Repeating it succeeds.")
+            .Produces(StatusCodes.Status204NoContent)
+            .ProducesProblem(StatusCodes.Status403Forbidden);
     }
 
     private static Task<IResult> GetHistoryAsync(HttpContext http, Guid id, MessageWorkflow workflow)
@@ -58,4 +72,25 @@ internal static class MessageEndpoints
                 ? Results.Json(result.Value, statusCode: StatusCodes.Status201Created)
                 : Results.Ok(result.Value));
     }
+
+    private static async Task<IResult> EditAsync(HttpContext http, Guid id, Guid messageId, MessageWorkflow workflow)
+    {
+        var body = await SogaHttp.ReadBodyAsync<EditMessageRequest>(http);
+        if (!body.IsSuccess)
+        {
+            return SogaHttp.Problem(http, body.Error!);
+        }
+
+        var request = body.Value;
+        return await SogaHttp.RunAsync(
+            http,
+            (caller, ct) => workflow.EditAsync(caller, id, messageId, request, ct),
+            message => Results.Ok(message));
+    }
+
+    private static Task<IResult> DeleteAsync(HttpContext http, Guid id, Guid messageId, MessageWorkflow workflow) =>
+        SogaHttp.RunAsync(
+            http,
+            (caller, ct) => workflow.DeleteAsync(caller, id, messageId, ct),
+            _ => Results.NoContent());
 }

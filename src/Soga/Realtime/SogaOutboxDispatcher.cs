@@ -5,7 +5,9 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Soga.Configuration;
 using Soga.Diagnostics;
+using Soga.Extensibility;
 using Soga.Persistence;
+using Soga.Synchronization;
 
 namespace Soga.Realtime;
 
@@ -131,6 +133,7 @@ internal sealed partial class SogaOutboxDispatcher(
             try
             {
                 await publisher.PublishAsync(message, cancellationToken);
+                await RunHandlersAsync(scope.ServiceProvider, message, cancellationToken);
                 await store.CompleteOutboxAsync(message, clock.GetUtcNow(), cancellationToken);
                 SogaDiagnostics.RecordOutboxPublished();
             }
@@ -155,6 +158,33 @@ internal sealed partial class SogaOutboxDispatcher(
 
         SogaDiagnostics.RecordDispatchDuration(clock.GetElapsedTime(started));
         return claimed.Count;
+    }
+
+    /// <summary>
+    /// Runs host event handlers after realtime publication. A handler failure fails the whole event, which is retried, so
+    /// handlers must be idempotent (deduplicate by event ID). Realtime may therefore be repeated, never skipped.
+    /// </summary>
+    private async Task RunHandlersAsync(IServiceProvider services, OutboxMessage message, CancellationToken cancellationToken)
+    {
+        var handlers = services.GetServices<ISogaEventSubscriber>().ToArray();
+        if (handlers.Length == 0)
+        {
+            return;
+        }
+
+        var notification = new SogaEventNotification(message.TenantId, SogaEventSerializer.Deserialize(message.Payload));
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                await handler.HandleAsync(notification, cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                SogaLog.EventSubscriberFailure(logger, handler.GetType().Name, exception.GetType().Name);
+                throw;
+            }
+        }
     }
 
     private async Task PurgeIfDueAsync(CancellationToken cancellationToken)

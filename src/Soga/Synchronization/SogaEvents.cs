@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Soga.Contracts;
+using Soga.Groups;
 using Soga.Persistence;
 
 namespace Soga.Synchronization;
@@ -29,6 +30,26 @@ internal static class SogaEventFactory
         message.Sequence,
         new MessageCreatedData(message.ToResponse()));
 
+    public static SogaEvent MessageUpdated(Guid eventId, MessageRecord message, DateTimeOffset occurredAt) => Create(
+        eventId,
+        SogaEventTypes.MessageUpdated,
+        occurredAt,
+        message.ConversationId,
+        message.Sequence,
+        new MessageCreatedData(message.ToResponse()));
+
+    public static SogaEvent MessageDeleted(
+        Guid eventId,
+        MessageRecord message,
+        string deletedBy,
+        DateTimeOffset occurredAt) => Create(
+        eventId,
+        SogaEventTypes.MessageDeleted,
+        occurredAt,
+        message.ConversationId,
+        message.Sequence,
+        new MessageDeletedData(message.Id, deletedBy, occurredAt));
+
     public static SogaEvent ReadPositionChanged(
         Guid eventId,
         Guid conversationId,
@@ -47,26 +68,36 @@ internal static class SogaEventFactory
         Guid conversationId,
         IReadOnlyList<string> participantIds,
         string? externalReference,
-        DateTimeOffset createdAt) => Create(
+        DateTimeOffset createdAt,
+        string kind = SogaConversationKinds.Direct,
+        string? title = null) => Create(
         eventId,
         SogaEventTypes.ConversationCreated,
         createdAt,
         conversationId,
         sequence: null,
-        new ConversationCreatedData(participantIds, externalReference, createdAt));
+        new ConversationCreatedData(participantIds, externalReference, createdAt, kind, title));
 
-    private static SogaEvent Create<T>(
+    /// <summary>Wraps an event planned by <see cref="GroupRules"/> with its ID and time.</summary>
+    public static SogaEvent FromPlan(Guid eventId, Guid conversationId, PlannedEvent plan, DateTimeOffset occurredAt) =>
+        Create(eventId, plan.Type, occurredAt, conversationId, sequence: null, plan.Data);
+
+    /// <summary>Builds an ephemeral event. It is broadcast once and never stored.</summary>
+    public static SogaEvent Ephemeral(string type, Guid conversationId, object data, DateTimeOffset occurredAt) =>
+        Create(Guid.NewGuid(), type, occurredAt, conversationId, sequence: null, data);
+
+    private static SogaEvent Create(
         Guid eventId,
         string type,
         DateTimeOffset occurredAt,
         Guid conversationId,
         long? sequence,
-        T data) => new(
+        object data) => new(
         eventId,
         SogaProtocol.Version,
         type,
         occurredAt,
         conversationId,
         sequence,
-        JsonSerializer.SerializeToElement(data, SogaEventSerializer.Options));
+        JsonSerializer.SerializeToElement(data, data.GetType(), SogaEventSerializer.Options));
 }

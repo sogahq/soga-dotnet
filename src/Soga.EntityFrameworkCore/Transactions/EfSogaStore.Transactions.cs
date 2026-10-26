@@ -1,8 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using Soga.Contracts;
 using Soga.EntityFrameworkCore.Entities;
 using Soga.Persistence;
 using Soga.Synchronization;
-using Soga.Contracts;
 
 namespace Soga.EntityFrameworkCore.Repositories;
 
@@ -55,7 +55,7 @@ internal sealed partial class EfSogaStore<TContext>
     {
         foreach (var entry in _db.ChangeTracker.Entries().ToList())
         {
-            if (entry.Entity is ConversationRow or ParticipantRow or MessageRow or ChangeRow or TenantStateRow or OutboxRow)
+            if (entry.Entity is ConversationRow or ParticipantRow or MessageRow or MessageEditRow or ChangeRow or TenantStateRow or OutboxRow)
             {
                 entry.State = EntityState.Detached;
             }
@@ -110,8 +110,11 @@ internal sealed partial class EfSogaStore<TContext>
             .SingleAsync(cancellationToken);
     }
 
-    /// <summary>Adds the durable change and the outbox event for one protocol event. Both share the event ID and payload.</summary>
-    private void Enqueue(string tenantId, long changeSequence, SogaEvent evt)
+    /// <summary>
+    /// Adds the durable change and the outbox event for one protocol event. Both share the event ID and payload.
+    /// <paramref name="targetUserId"/> keeps the change visible to that user through sync after they lose access.
+    /// </summary>
+    private void Enqueue(string tenantId, long changeSequence, SogaEvent evt, string? targetUserId = null)
     {
         var payload = SogaEventSerializer.Serialize(evt);
 
@@ -122,6 +125,7 @@ internal sealed partial class EfSogaStore<TContext>
             EventId = evt.EventId,
             ChangeType = evt.Type,
             ConversationId = evt.ConversationId,
+            TargetUserId = targetUserId,
             Payload = payload,
             OccurredAt = evt.OccurredAt,
         });

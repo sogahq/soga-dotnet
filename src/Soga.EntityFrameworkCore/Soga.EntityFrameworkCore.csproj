@@ -3,7 +3,7 @@
   <PropertyGroup>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>Soga.EntityFrameworkCore</PackageId>
-    <Version>0.1.0-preview.1</Version>
+    <Version>0.2.0-preview.1</Version>
     <Authors>Zhuwa Africa Limited</Authors>
     <Description>Entity Framework Core persistence integration for Soga.</Description>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>

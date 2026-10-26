@@ -5,9 +5,12 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Soga.Abstractions;
+using Soga.Authorization;
 using Soga.Configuration;
 using Soga.Conversations;
 using Soga.Diagnostics;
+using Soga.Extensibility;
+using Soga.Groups;
 using Soga.Identity;
 using Soga.Messages;
 using Soga.Persistence;
@@ -56,16 +59,26 @@ public static class SogaServiceCollectionExtensions
         services.TryAddSingleton<SogaCursorProtector>();
         services.TryAddSingleton<SogaOutboxSignal>();
         services.TryAddSingleton<SogaRealtimePublisher>();
+        services.TryAddSingleton<SogaConnectionRegistry>();
+        services.TryAddSingleton<SogaTypingTracker>();
+        services.TryAddSingleton<SogaPresenceBroadcaster>();
+        services.TryAddSingleton<ISogaPresenceProvider, InMemoryPresenceProvider>();
+        services.TryAddSingleton<ISogaAuditSink, LoggingAuditSink>();
+        services.TryAddSingleton<SogaAuditor>();
 
         services.TryAddScoped<ISogaUserContext, HttpSogaUserContext>();
         services.TryAddScoped<ISogaTenantContext, SingleTenantContext>();
         services.TryAddScoped<SogaCallerResolver>();
+        services.TryAddScoped<SogaAuthorizer>();
         services.TryAddScoped<ConversationWorkflow>();
+        services.TryAddScoped<GroupWorkflow>();
         services.TryAddScoped<MessageWorkflow>();
         services.TryAddScoped<ReadStateWorkflow>();
         services.TryAddScoped<SyncWorkflow>();
+        services.TryAddScoped<ISogaSystemMessages, SogaSystemMessages>();
 
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, SogaOutboxDispatcher>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, SogaEphemeralService>());
         services.AddHealthChecks().AddCheck<SogaHealthCheck>("soga", HealthStatus.Unhealthy, ["soga"]);
 
         return new SogaBuilder(services);

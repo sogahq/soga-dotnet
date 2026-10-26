@@ -3,6 +3,7 @@ using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Soga.Authorization;
 using Soga.EntityFrameworkCore.Extensions;
 using Soga.Extensions;
 
@@ -19,6 +20,10 @@ builder.Services.AddDbContext<MarketplaceDbContext>(options =>
 builder.Services
     .AddSoga(options => options.Messages.MaximumTextLength = 4_000)
     .UseEntityFrameworkCore<MarketplaceDbContext>();
+
+// Soga checks membership and roles. Who may START a conversation is the marketplace's decision, so it plugs in a policy.
+// A policy can only deny: it can never grant more than Soga allows.
+builder.Services.AddScoped<ISogaAuthorizationPolicy, OrderConversationPolicy>();
 
 var app = builder.Build();
 

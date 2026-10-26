@@ -18,6 +18,7 @@
     <File Path="docs/concepts/README.md" />
     <File Path="docs/deployment/README.md" />
     <File Path="docs/getting-started/README.md" />
+    <File Path="docs/migration/v1-to-v2.md" />
     <File Path="docs/security/README.md" />
   </Folder>
   <Folder Name="/docs/decisions/">
@@ -32,10 +33,17 @@
     <File Path="docs/decisions/0009-outbox-dispatch.md" />
     <File Path="docs/decisions/0010-protocol-versioning.md" />
     <File Path="docs/decisions/0011-idempotency-conflict.md" />
+    <File Path="docs/decisions/0012-groups-and-roles.md" />
+    <File Path="docs/decisions/0013-message-lifecycle.md" />
+    <File Path="docs/decisions/0014-extension-points-and-host-policy.md" />
+    <File Path="docs/decisions/0015-typing-and-presence.md" />
+    <File Path="docs/decisions/0016-database-providers-and-identity-collation.md" />
+    <File Path="docs/decisions/0017-v2-protocol-and-compatibility.md" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Soga.MarketplaceSample/Soga.MarketplaceSample.csproj" />
     <Project Path="samples/Soga.MinimalSample/Soga.MinimalSample.csproj" />
+    <Project Path="samples/Soga.TeamChatSample/Soga.TeamChatSample.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Soga.EntityFrameworkCore/Soga.EntityFrameworkCore.csproj" />

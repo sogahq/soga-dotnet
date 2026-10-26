@@ -23,7 +23,8 @@ internal sealed partial class EfSogaStore<TContext>
         int limit,
         CancellationToken cancellationToken)
     {
-        // Access is evaluated now, not when the change was written: a user who lost a conversation stops receiving its changes.
+        // Access is evaluated now, not when the change was written: a user who lost a conversation stops receiving its
+        // changes. Changes addressed to the user (their own removal) stay visible so they learn they lost access.
         var accessible = _db.Set<ParticipantRow>()
             .AsNoTracking()
             .Where(p => p.TenantId == tenantId && p.UserId == userId && p.LeftAt == null)
@@ -31,7 +32,9 @@ internal sealed partial class EfSogaStore<TContext>
 
         var rows = await _db.Set<ChangeRow>()
             .AsNoTracking()
-            .Where(c => c.TenantId == tenantId && c.Sequence > afterSequence && accessible.Contains(c.ConversationId))
+            .Where(c => c.TenantId == tenantId &&
+                c.Sequence > afterSequence &&
+                (accessible.Contains(c.ConversationId) || c.TargetUserId == userId))
             .OrderBy(c => c.Sequence)
             .Take(limit + 1)
             .Select(c => new { c.Sequence, c.Payload })

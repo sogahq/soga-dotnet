@@ -15,7 +15,7 @@ public sealed class ModelTests
         var tables = context.Model.GetEntityTypes().Select(e => e.GetTableName()!).Order().ToArray();
 
         Assert.Equal(
-            ["SogaChanges", "SogaConversations", "SogaMessages", "SogaOutbox", "SogaParticipants", "SogaTenantState"],
+            ["SogaChanges", "SogaConversations", "SogaMessageEdits", "SogaMessages", "SogaOutbox", "SogaParticipants", "SogaTenantState"],
             tables);
     }
 
@@ -68,7 +68,7 @@ public sealed class ModelTests
             .Select(fk => fk.PrincipalEntityType.ClrType)
             .Distinct();
 
-        Assert.All(foreignKeyTargets, target => Assert.Equal(typeof(ConversationRow), target));
+        Assert.All(foreignKeyTargets, target => Assert.Contains(target, new[] { typeof(ConversationRow), typeof(MessageRow) }));
     }
 
     [Fact]

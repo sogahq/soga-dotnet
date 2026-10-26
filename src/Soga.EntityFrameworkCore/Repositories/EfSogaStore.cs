@@ -1,6 +1,10 @@
 using Microsoft.EntityFrameworkCore;
+using Soga.Contracts;
 using Soga.Conversations;
+using Soga.EntityFrameworkCore.Configuration;
 using Soga.EntityFrameworkCore.Entities;
+using Soga.Groups;
+using Soga.Messages;
 using Soga.Persistence;
 using Soga.Synchronization;
 
@@ -8,8 +12,9 @@ namespace Soga.EntityFrameworkCore.Repositories;
 
 /// <summary>
 /// The relational Soga store. Every write commits the entity change, its durable synchronization change, and its
-/// outbox event in one transaction. Ordering and idempotency are enforced by database constraints; application
-/// prechecks only make the common path cheap.
+/// outbox event in one transaction. Ordering, idempotency, and uniqueness are enforced by database constraints;
+/// application prechecks only make the common path cheap. Group changes lock the conversation row and are decided
+/// by the same pure <c>GroupRules</c> the in-memory provider uses.
 /// </summary>
 internal sealed partial class EfSogaStore<TContext> : ISogaStore
     where TContext : DbContext
@@ -20,12 +25,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
     {
         ArgumentNullException.ThrowIfNull(db);
 
-        if (db.Model.FindEntityType(typeof(ConversationRow)) is null)
-        {
-            throw new InvalidOperationException(
-                $"{typeof(TContext).Name} does not include the Soga model. Call modelBuilder.AddSoga() from OnModelCreating and add a migration.");
-        }
-
+        SogaEfModelCheck.Validate(db);
         _db = db;
     }
 
@@ -47,8 +47,8 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
 
                 if (existingId is { } id)
                 {
-                    var existing = await LoadConversationsAsync(command.TenantId, command.UserId, id, 1, token);
-                    return new DirectConversationOutcome(existing[0], false);
+                    var existing = await LoadOneAsync(command.TenantId, command.UserId, id, token);
+                    return new DirectConversationOutcome(existing!, false);
                 }
 
                 // Allocate the change sequence before adding entities: the first write for a tenant saves its counter row.
@@ -60,7 +60,9 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
                     Id = command.ConversationId,
                     TenantId = command.TenantId,
                     DirectKey = key,
+                    Kind = SogaConversationKinds.Direct,
                     ExternalReference = command.ExternalReference,
+                    MetadataJson = command.MetadataJson,
                     CreatedAt = command.Now,
                     LastActivityAt = command.Now,
                 });
@@ -72,6 +74,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
                         TenantId = command.TenantId,
                         ConversationId = command.ConversationId,
                         UserId = participant,
+                        Role = SogaRole.Member,
                         JoinedAt = command.Now,
                     });
                 }
@@ -88,303 +91,483 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
 
                 await _db.SaveChangesAsync(token);
 
-                var created = await LoadConversationsAsync(command.TenantId, command.UserId, command.ConversationId, 1, token);
-                return new DirectConversationOutcome(created[0], true);
+                var created = await LoadOneAsync(command.TenantId, command.UserId, command.ConversationId, token);
+                return new DirectConversationOutcome(created!, true);
             },
             cancellationToken);
 
-    public async Task<ConversationRecord?> GetConversationAsync(
-        string tenantId,
-        string userId,
-        Guid conversationId,
-        CancellationToken cancellationToken)
-    {
-        var conversations = await LoadConversationsAsync(tenantId, userId, conversationId, 1, cancellationToken);
-        return conversations.Count == 0 ? null : conversations[0];
-    }
-
-    public async Task<IReadOnlyList<ConversationRecord>> ListConversationsAsync(
-        string tenantId,
-        string userId,
-        int limit,
-        CancellationToken cancellationToken) =>
-        await LoadConversationsAsync(tenantId, userId, null, limit, cancellationToken);
-
-    public Task<AppendMessageOutcome> AppendMessageAsync(
-        AppendMessageCommand command,
-        CancellationToken cancellationToken) =>
+    public Task<ConversationRecord> CreateGroupAsync(CreateGroupCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
             {
-                // A non-participant and a missing conversation are indistinguishable by design.
-                var isParticipant = await _db.Set<ParticipantRow>().AsNoTracking().AnyAsync(
-                    p => p.TenantId == command.TenantId &&
-                        p.ConversationId == command.ConversationId &&
-                        p.UserId == command.UserId &&
-                        p.LeftAt == null,
-                    token);
-                if (!isParticipant)
-                {
-                    return new AppendMessageOutcome(AppendStatus.ConversationNotFound, null);
-                }
-
-                var existing = await _db.Set<MessageRow>().AsNoTracking().FirstOrDefaultAsync(
-                    m => m.TenantId == command.TenantId &&
-                        m.ConversationId == command.ConversationId &&
-                        m.SenderId == command.UserId &&
-                        m.ClientMessageId == command.ClientMessageId,
-                    token);
-                if (existing is not null)
-                {
-                    var status = string.Equals(existing.Content, command.Content, StringComparison.Ordinal)
-                        ? AppendStatus.Duplicate
-                        : AppendStatus.IdempotencyConflict;
-                    return new AppendMessageOutcome(status, ToRecord(existing));
-                }
-
-                // Lock order is always conversation row, then tenant counter row, so concurrent sends cannot deadlock.
-                var sequence = await AllocateMessageSequenceAsync(command.TenantId, command.ConversationId, command.Now, token);
                 var changeSequence = await AllocateChangeSequenceAsync(command.TenantId, token);
+                var others = command.OtherParticipantIds
+                    .Distinct(StringComparer.Ordinal)
+                    .Where(id => !string.Equals(id, command.UserId, StringComparison.Ordinal))
+                    .ToList();
+                var everyone = new[] { command.UserId }.Concat(others).Order(StringComparer.Ordinal).ToArray();
 
-                var message = new MessageRecord(
-                    command.MessageId,
-                    command.ConversationId,
-                    sequence,
-                    command.UserId,
-                    command.ClientMessageId,
-                    command.Content,
-                    command.Now);
-
-                _db.Add(new MessageRow
+                _db.Add(new ConversationRow
                 {
-                    Id = message.Id,
+                    Id = command.ConversationId,
                     TenantId = command.TenantId,
-                    ConversationId = message.ConversationId,
-                    Sequence = message.Sequence,
-                    SenderId = message.SenderId,
-                    ClientMessageId = message.ClientMessageId,
-                    Kind = SogaMappers.MessageKind,
-                    Content = message.Content,
-                    CreatedAt = message.CreatedAt,
+                    DirectKey = $"g:{command.ConversationId:N}",
+                    Kind = SogaConversationKinds.Group,
+                    Title = command.Title,
+                    ExternalReference = command.ExternalReference,
+                    MetadataJson = command.MetadataJson,
+                    CreatedAt = command.Now,
+                    LastActivityAt = command.Now,
                 });
 
-                Enqueue(command.TenantId, changeSequence, SogaEventFactory.MessageCreated(command.EventId, message, command.Now));
-                await _db.SaveChangesAsync(token);
+                _db.Add(NewParticipant(command.TenantId, command.ConversationId, command.UserId, SogaRole.Owner, command.Now, 0));
+                foreach (var other in others)
+                {
+                    _db.Add(NewParticipant(command.TenantId, command.ConversationId, other, SogaRole.Member, command.Now, 0));
+                }
 
-                return new AppendMessageOutcome(AppendStatus.Created, message);
+                Enqueue(
+                    command.TenantId,
+                    changeSequence,
+                    SogaEventFactory.ConversationCreated(
+                        command.EventId,
+                        command.ConversationId,
+                        everyone,
+                        command.ExternalReference,
+                        command.Now,
+                        SogaConversationKinds.Group,
+                        command.Title));
+
+                await _db.SaveChangesAsync(token);
+                return (await LoadOneAsync(command.TenantId, command.UserId, command.ConversationId, token))!;
             },
             cancellationToken);
 
-    public async Task<IReadOnlyList<MessageRecord>?> GetMessagesAsync(
-        string tenantId,
-        string userId,
-        Guid conversationId,
-        long? beforeSequence,
-        int limit,
-        CancellationToken cancellationToken)
-    {
-        var isParticipant = await IsActiveParticipantAsync(tenantId, userId, conversationId, cancellationToken);
-        if (!isParticipant)
-        {
-            return null;
-        }
-
-        var query = _db.Set<MessageRow>()
-            .AsNoTracking()
-            .Where(m => m.TenantId == tenantId && m.ConversationId == conversationId);
-
-        if (beforeSequence is { } before)
-        {
-            query = query.Where(m => m.Sequence < before);
-        }
-
-        var rows = await query.OrderByDescending(m => m.Sequence).Take(limit).ToListAsync(cancellationToken);
-        return rows.Select(ToRecord).ToList();
-    }
-
-    public Task<AdvanceReadOutcome> AdvanceReadPositionAsync(
-        AdvanceReadCommand command,
-        CancellationToken cancellationToken) =>
+    public Task<GroupMutationOutcome> MutateGroupAsync(GroupMutationCommand command, CancellationToken cancellationToken) =>
         ExecuteInTransactionAsync(
             async token =>
             {
-                var lastRead = await _db.Set<ParticipantRow>()
-                    .AsNoTracking()
-                    .Where(p => p.TenantId == command.TenantId &&
-                        p.ConversationId == command.ConversationId &&
-                        p.UserId == command.UserId &&
-                        p.LeftAt == null)
-                    .Select(p => (long?)p.LastReadSequence)
-                    .FirstOrDefaultAsync(token);
-                if (lastRead is null)
+                // A no-op UPDATE takes the conversation row lock and holds it until commit, so concurrent membership,
+                // role, and ownership changes on one group run one at a time and each sees the previous result.
+                var locked = await _db.Set<ConversationRow>()
+                    .Where(c => c.TenantId == command.TenantId && c.Id == command.ConversationId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(c => c.LastSequence, c => c.LastSequence), token);
+                if (locked == 0)
                 {
-                    return new AdvanceReadOutcome(AdvanceStatus.ConversationNotFound, 0, 0);
+                    return new GroupMutationOutcome(GroupError.NotFound, false, null);
                 }
 
-                var messageSequence = await _db.Set<MessageRow>()
-                    .AsNoTracking()
-                    .Where(m => m.TenantId == command.TenantId &&
-                        m.ConversationId == command.ConversationId &&
-                        m.Id == command.MessageId)
-                    .Select(m => (long?)m.Sequence)
-                    .FirstOrDefaultAsync(token);
-                if (messageSequence is null)
+                var conversation = await _db.Set<ConversationRow>().AsNoTracking()
+                    .SingleAsync(c => c.TenantId == command.TenantId && c.Id == command.ConversationId, token);
+                var participants = await _db.Set<ParticipantRow>().AsNoTracking()
+                    .Where(p => p.TenantId == command.TenantId && p.ConversationId == command.ConversationId)
+                    .ToListAsync(token);
+
+                var snapshot = new GroupSnapshot(
+                    conversation.Kind == SogaConversationKinds.Group,
+                    conversation.ArchivedAt is not null,
+                    conversation.Title,
+                    conversation.MetadataJson,
+                    [.. participants.Select(p => new ParticipantSnapshot(p.UserId, p.Role, p.LeftAt is null))]);
+
+                var decision = GroupRules.Decide(snapshot, command.ActorId, command.Mutation, command.MaximumParticipants);
+                if (decision.Error != GroupError.None)
                 {
-                    return new AdvanceReadOutcome(AdvanceStatus.MessageNotFound, 0, 0);
+                    return new GroupMutationOutcome(decision.Error, false, null);
                 }
 
-                var target = messageSequence.Value;
-                var advanced = false;
-                if (target > lastRead.Value)
+                if (!decision.Changed)
                 {
-                    // The WHERE guard makes the update monotonic even when two devices race: a stale writer changes nothing.
-                    var updated = await _db.Set<ParticipantRow>()
-                        .Where(p => p.TenantId == command.TenantId &&
-                            p.ConversationId == command.ConversationId &&
-                            p.UserId == command.UserId &&
-                            p.LastReadSequence < target)
-                        .ExecuteUpdateAsync(
-                            s => s.SetProperty(p => p.LastReadSequence, target).SetProperty(p => p.LastReadAt, command.Now),
-                            token);
-                    advanced = updated == 1;
+                    return new GroupMutationOutcome(
+                        GroupError.None,
+                        false,
+                        await LoadOneAsync(command.TenantId, command.ActorId, command.ConversationId, token));
                 }
 
-                if (advanced)
+                await ApplyMutationAsync(command, conversation, participants, token);
+
+                var first = true;
+                foreach (var plan in decision.Events)
                 {
+                    var eventId = first ? command.EventId : command.Ids.NewId();
+                    first = false;
                     var changeSequence = await AllocateChangeSequenceAsync(command.TenantId, token);
                     Enqueue(
                         command.TenantId,
                         changeSequence,
-                        SogaEventFactory.ReadPositionChanged(
-                            command.EventId,
-                            command.ConversationId,
-                            command.UserId,
-                            target,
-                            command.Now));
-                    await _db.SaveChangesAsync(token);
+                        SogaEventFactory.FromPlan(eventId, command.ConversationId, plan, command.Now),
+                        plan.TargetUserId);
+
+                    if (command.PostSystemMessage && plan.Data is ParticipantChangedData participantChange)
+                    {
+                        await AddSystemMessageAsync(
+                            command,
+                            SystemMessageContent.ForParticipantChange(participantChange),
+                            token);
+                    }
                 }
 
-                var current = await _db.Set<ParticipantRow>()
-                    .AsNoTracking()
-                    .Where(p => p.TenantId == command.TenantId &&
-                        p.ConversationId == command.ConversationId &&
-                        p.UserId == command.UserId)
-                    .Select(p => p.LastReadSequence)
-                    .SingleAsync(token);
+                await _db.SaveChangesAsync(token);
 
-                var unread = await _db.Set<MessageRow>().AsNoTracking().CountAsync(
-                    m => m.TenantId == command.TenantId &&
-                        m.ConversationId == command.ConversationId &&
-                        m.Sequence > current &&
-                        m.SenderId != command.UserId,
-                    token);
-
-                return new AdvanceReadOutcome(
-                    advanced ? AdvanceStatus.Advanced : AdvanceStatus.Unchanged,
-                    current,
-                    unread);
+                // The actor may have just removed themselves: then there is nothing left they may see.
+                return new GroupMutationOutcome(
+                    GroupError.None,
+                    true,
+                    await LoadOneAsync(command.TenantId, command.ActorId, command.ConversationId, token));
             },
             cancellationToken);
 
-    public async Task<long> GetTotalUnreadAsync(string tenantId, string userId, CancellationToken cancellationToken)
-    {
-        var unread =
-            from message in _db.Set<MessageRow>().AsNoTracking()
-            join participant in _db.Set<ParticipantRow>().AsNoTracking()
-                on new { message.TenantId, message.ConversationId }
-                equals new { participant.TenantId, participant.ConversationId }
-            where participant.TenantId == tenantId &&
-                participant.UserId == userId &&
-                participant.LeftAt == null &&
-                message.Sequence > participant.LastReadSequence &&
-                message.SenderId != userId
-            select message.Id;
-
-        return await unread.LongCountAsync(cancellationToken);
-    }
-
-    public async Task<bool> CheckHealthAsync(CancellationToken cancellationToken) =>
-        await _db.Database.CanConnectAsync(cancellationToken);
-
-    private async Task<bool> IsActiveParticipantAsync(
+    public async Task<ConversationAccess?> GetAccessAsync(
         string tenantId,
         string userId,
         Guid conversationId,
-        CancellationToken cancellationToken) =>
-        await _db.Set<ParticipantRow>().AsNoTracking().AnyAsync(
-            p => p.TenantId == tenantId &&
-                p.ConversationId == conversationId &&
-                p.UserId == userId &&
-                p.LeftAt == null,
-            cancellationToken);
-
-    /// <summary>Loads conversation summaries in two queries: one projection with unread counts, one batched participant lookup.</summary>
-    private async Task<List<ConversationRecord>> LoadConversationsAsync(
-        string tenantId,
-        string userId,
-        Guid? conversationId,
-        int limit,
         CancellationToken cancellationToken)
     {
-        var summaries =
+        var access = await (
             from participant in _db.Set<ParticipantRow>().AsNoTracking()
             join conversation in _db.Set<ConversationRow>().AsNoTracking()
                 on new { participant.TenantId, Id = participant.ConversationId }
                 equals new { conversation.TenantId, conversation.Id }
             where participant.TenantId == tenantId &&
                 participant.UserId == userId &&
-                participant.LeftAt == null &&
-                (conversationId == null || conversation.Id == conversationId)
+                participant.ConversationId == conversationId &&
+                participant.LeftAt == null
+            select new
+            {
+                conversation.Kind,
+                participant.Role,
+                Archived = conversation.ArchivedAt != null,
+                conversation.ExternalReference,
+            }).FirstOrDefaultAsync(cancellationToken);
+
+        return access is null ? null : new ConversationAccess(access.Kind, access.Role, access.Archived, access.ExternalReference);
+    }
+
+    public Task<ConversationRecord?> GetConversationAsync(
+        string tenantId,
+        string userId,
+        Guid conversationId,
+        CancellationToken cancellationToken) => LoadOneAsync(tenantId, userId, conversationId, cancellationToken);
+
+    public async Task<ConversationPage> ListConversationsAsync(ListConversationsQuery query, CancellationToken cancellationToken)
+    {
+        var (items, hasMore) = await LoadConversationsAsync(
+            query.TenantId,
+            query.UserId,
+            conversationId: null,
+            query.Kind,
+            query.State,
+            query.ExternalReference,
+            query.AfterActivity,
+            query.SkipTies,
+            query.Limit,
+            allParticipants: false,
+            cancellationToken);
+        return new ConversationPage(items, hasMore);
+    }
+
+    public async Task<IReadOnlyList<Guid>> ListActiveConversationIdsAsync(
+        string tenantId,
+        string userId,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var ids = await (
+            from participant in _db.Set<ParticipantRow>().AsNoTracking()
+            join conversation in _db.Set<ConversationRow>().AsNoTracking()
+                on new { participant.TenantId, Id = participant.ConversationId }
+                equals new { conversation.TenantId, conversation.Id }
+            where participant.TenantId == tenantId && participant.UserId == userId && participant.LeftAt == null
+            orderby conversation.LastActivityAt descending, conversation.Id descending
+            select conversation.Id).Take(limit).ToListAsync(cancellationToken);
+        return ids;
+    }
+
+    public async Task<bool> CheckHealthAsync(CancellationToken cancellationToken) =>
+        await _db.Database.CanConnectAsync(cancellationToken);
+
+    private static ParticipantRow NewParticipant(
+        string tenantId,
+        Guid conversationId,
+        string userId,
+        SogaRole role,
+        DateTimeOffset now,
+        long lastReadSequence) => new()
+    {
+        TenantId = tenantId,
+        ConversationId = conversationId,
+        UserId = userId,
+        Role = role,
+        JoinedAt = now,
+        LastReadSequence = lastReadSequence,
+    };
+
+    private async Task ApplyMutationAsync(
+        GroupMutationCommand command,
+        ConversationRow conversation,
+        List<ParticipantRow> participants,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = command.TenantId;
+        var conversationId = command.ConversationId;
+
+        switch (command.Mutation)
+        {
+            case AddParticipantMutation add:
+                if (participants.Exists(p => p.UserId == add.UserId))
+                {
+                    // Re-adding someone who left reactivates their row. New members start caught up: history is
+                    // visible to them, but it does not arrive as a wall of unread messages.
+                    await _db.Set<ParticipantRow>()
+                        .Where(p => p.TenantId == tenantId && p.ConversationId == conversationId && p.UserId == add.UserId)
+                        .ExecuteUpdateAsync(
+                            s => s.SetProperty(p => p.LeftAt, (DateTimeOffset?)null)
+                                .SetProperty(p => p.Role, add.Role)
+                                .SetProperty(p => p.JoinedAt, command.Now)
+                                .SetProperty(p => p.LastReadSequence, conversation.LastSequence),
+                            cancellationToken);
+                }
+                else
+                {
+                    _db.Add(NewParticipant(tenantId, conversationId, add.UserId, add.Role, command.Now, conversation.LastSequence));
+                }
+
+                break;
+
+            case RemoveParticipantMutation remove:
+                await _db.Set<ParticipantRow>()
+                    .Where(p => p.TenantId == tenantId && p.ConversationId == conversationId && p.UserId == remove.UserId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(p => p.LeftAt, (DateTimeOffset?)command.Now), cancellationToken);
+                break;
+
+            case ChangeRoleMutation change:
+                await _db.Set<ParticipantRow>()
+                    .Where(p => p.TenantId == tenantId && p.ConversationId == conversationId && p.UserId == change.UserId && p.LeftAt == null)
+                    .ExecuteUpdateAsync(s => s.SetProperty(p => p.Role, change.Role), cancellationToken);
+                break;
+
+            case UpdateConversationMutation update:
+                var rows = _db.Set<ConversationRow>().Where(c => c.TenantId == tenantId && c.Id == conversationId);
+                if (update.SetTitle)
+                {
+                    await rows.ExecuteUpdateAsync(s => s.SetProperty(c => c.Title, update.Title), cancellationToken);
+                }
+
+                if (update.SetMetadata)
+                {
+                    await rows.ExecuteUpdateAsync(s => s.SetProperty(c => c.MetadataJson, update.MetadataJson), cancellationToken);
+                }
+
+                break;
+
+            case ArchiveMutation archive:
+                await _db.Set<ConversationRow>()
+                    .Where(c => c.TenantId == tenantId && c.Id == conversationId)
+                    .ExecuteUpdateAsync(
+                        s => s.SetProperty(c => c.ArchivedAt, archive.Archived ? (DateTimeOffset?)command.Now : null),
+                        cancellationToken);
+                break;
+        }
+    }
+
+    private async Task AddSystemMessageAsync(GroupMutationCommand command, string content, CancellationToken cancellationToken)
+    {
+        var messageId = command.Ids.NewId();
+        var sequence = await AllocateMessageSequenceAsync(command.TenantId, command.ConversationId, command.Now, cancellationToken);
+        var changeSequence = await AllocateChangeSequenceAsync(command.TenantId, cancellationToken);
+        var clientMessageId = $"sys:{messageId:N}";
+
+        _db.Add(new MessageRow
+        {
+            Id = messageId,
+            TenantId = command.TenantId,
+            ConversationId = command.ConversationId,
+            Sequence = sequence,
+            SenderId = SogaSystemSender.UserId,
+            ClientMessageId = clientMessageId,
+            Kind = SogaMessageKinds.System,
+            Content = content,
+            CreatedAt = command.Now,
+        });
+
+        var record = new MessageRecord(
+            messageId,
+            command.ConversationId,
+            sequence,
+            SogaSystemSender.UserId,
+            clientMessageId,
+            content,
+            command.Now,
+            SogaMessageKinds.System);
+        Enqueue(command.TenantId, changeSequence, SogaEventFactory.MessageCreated(command.Ids.NewId(), record, command.Now));
+    }
+
+    private async Task<ConversationRecord?> LoadOneAsync(
+        string tenantId,
+        string userId,
+        Guid conversationId,
+        CancellationToken cancellationToken)
+    {
+        var (items, _) = await LoadConversationsAsync(
+            tenantId,
+            userId,
+            conversationId,
+            kind: null,
+            ConversationStateFilter.All,
+            reference: null,
+            afterActivity: null,
+            skip: 0,
+            limit: 1,
+            allParticipants: true,
+            cancellationToken);
+        return items.Count == 0 ? null : items[0];
+    }
+
+    /// <summary>
+    /// Loads conversation summaries with a fixed number of queries regardless of page size: one projection with unread
+    /// counts, then batched lookups for participant counts, participant lists, and last messages.
+    /// </summary>
+    private async Task<(List<ConversationRecord> Items, bool HasMore)> LoadConversationsAsync(
+        string tenantId,
+        string userId,
+        Guid? conversationId,
+        string? kind,
+        ConversationStateFilter state,
+        string? reference,
+        DateTimeOffset? afterActivity,
+        int skip,
+        int limit,
+        bool allParticipants,
+        CancellationToken cancellationToken)
+    {
+        var conversations = _db.Set<ConversationRow>().AsNoTracking().Where(c => c.TenantId == tenantId);
+        if (conversationId is { } onlyId)
+        {
+            conversations = conversations.Where(c => c.Id == onlyId);
+        }
+
+        if (kind is not null)
+        {
+            conversations = conversations.Where(c => c.Kind == kind);
+        }
+
+        if (reference is not null)
+        {
+            conversations = conversations.Where(c => c.ExternalReference == reference);
+        }
+
+        if (state == ConversationStateFilter.Active)
+        {
+            conversations = conversations.Where(c => c.ArchivedAt == null);
+        }
+        else if (state == ConversationStateFilter.Archived)
+        {
+            conversations = conversations.Where(c => c.ArchivedAt != null);
+        }
+
+        if (afterActivity is { } after)
+        {
+            conversations = conversations.Where(c => c.LastActivityAt <= after);
+        }
+
+        var summaries =
+            from participant in _db.Set<ParticipantRow>().AsNoTracking()
+            join conversation in conversations
+                on new { participant.TenantId, Id = participant.ConversationId }
+                equals new { conversation.TenantId, conversation.Id }
+            where participant.TenantId == tenantId && participant.UserId == userId && participant.LeftAt == null
             orderby conversation.LastActivityAt descending, conversation.Id descending
             select new
             {
                 conversation.Id,
+                conversation.Kind,
+                conversation.Title,
                 conversation.ExternalReference,
+                conversation.MetadataJson,
                 conversation.CreatedAt,
                 conversation.LastActivityAt,
+                conversation.ArchivedAt,
                 conversation.LastSequence,
                 participant.LastReadSequence,
+                participant.Role,
                 Unread = _db.Set<MessageRow>().Count(m =>
                     m.TenantId == conversation.TenantId &&
                     m.ConversationId == conversation.Id &&
                     m.Sequence > participant.LastReadSequence &&
-                    m.SenderId != userId),
+                    m.SenderId != userId &&
+                    m.DeletedAt == null),
             };
 
-        var rows = await summaries.Take(limit).ToListAsync(cancellationToken);
+        // Fetch one extra row to learn whether another page exists.
+        var rows = await summaries.Skip(skip).Take(limit + 1).ToListAsync(cancellationToken);
+        var hasMore = rows.Count > limit;
+        rows = [.. rows.Take(limit)];
         if (rows.Count == 0)
         {
-            return [];
+            return ([], false);
         }
 
         var ids = rows.Select(r => r.Id).ToList();
-        var participants = await _db.Set<ParticipantRow>()
-            .AsNoTracking()
+
+        var counts = await _db.Set<ParticipantRow>().AsNoTracking()
             .Where(p => p.TenantId == tenantId && ids.Contains(p.ConversationId) && p.LeftAt == null)
-            .Select(p => new { p.ConversationId, p.UserId })
-            .ToListAsync(cancellationToken);
-
-        var byConversation = participants
             .GroupBy(p => p.ConversationId)
-            .ToDictionary(g => g.Key, g => (IReadOnlyList<string>)g.Select(p => p.UserId).Order(StringComparer.Ordinal).ToArray());
+            .Select(g => new { Id = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.Id, g => g.Count, cancellationToken);
 
-        return rows.Select(r => new ConversationRecord(
+        var listIds = rows.Where(r => allParticipants || r.Kind == SogaConversationKinds.Direct).Select(r => r.Id).ToList();
+        var participantRows = listIds.Count == 0
+            ? []
+            : await _db.Set<ParticipantRow>().AsNoTracking()
+                .Where(p => p.TenantId == tenantId && listIds.Contains(p.ConversationId) && p.LeftAt == null)
+                .Select(p => new { p.ConversationId, p.UserId, p.Role, p.JoinedAt })
+                .ToListAsync(cancellationToken);
+        var participantsByConversation = participantRows
+            .GroupBy(p => p.ConversationId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<ParticipantInfo>)[.. g
+                    .OrderBy(p => p.UserId, StringComparer.Ordinal)
+                    .Select(p => new ParticipantInfo(p.UserId, p.Role, p.JoinedAt))]);
+
+        var lastMessages = await (
+            from message in _db.Set<MessageRow>().AsNoTracking()
+            join conversation in _db.Set<ConversationRow>().AsNoTracking()
+                on new { message.TenantId, Id = message.ConversationId }
+                equals new { conversation.TenantId, conversation.Id }
+            where conversation.TenantId == tenantId && ids.Contains(conversation.Id) && message.Sequence == conversation.LastSequence
+            select new
+            {
+                message.Id,
+                message.ConversationId,
+                message.Sequence,
+                message.SenderId,
+                message.Kind,
+                message.Content,
+                message.CreatedAt,
+                Deleted = message.DeletedAt != null,
+            }).ToListAsync(cancellationToken);
+        var lastByConversation = lastMessages.ToDictionary(
+            m => m.ConversationId,
+            m => new MessageSummary(m.Id, m.Sequence, m.SenderId, m.Kind, SogaText.Snippet(m.Content), m.CreatedAt, m.Deleted));
+
+        var records = rows.Select(r => new ConversationRecord(
             r.Id,
+            r.Kind,
+            r.Title,
             r.ExternalReference,
-            byConversation.GetValueOrDefault(r.Id, []),
+            r.MetadataJson,
+            participantsByConversation.GetValueOrDefault(r.Id, []),
+            counts.GetValueOrDefault(r.Id),
             r.CreatedAt,
             r.LastActivityAt,
+            r.ArchivedAt,
             r.LastSequence,
             r.LastReadSequence,
-            r.Unread)).ToList();
-    }
+            r.Unread,
+            r.Role,
+            lastByConversation.GetValueOrDefault(r.Id))).ToList();
 
-    private static MessageRecord ToRecord(MessageRow row) => new(
-        row.Id,
-        row.ConversationId,
-        row.Sequence,
-        row.SenderId,
-        row.ClientMessageId,
-        row.Content,
-        row.CreatedAt);
+        return (records, hasMore);
+    }
 }

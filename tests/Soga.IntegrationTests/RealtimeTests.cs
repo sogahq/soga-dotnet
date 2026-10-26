@@ -77,6 +77,7 @@ public sealed class RealtimeTests
         await using var bobHub = server.Hub("bob");
         var inbox = new EventInbox(bobHub);
         await bobHub.StartAsync();
+        await bobHub.InvokeAsync<int>("NegotiateProtocol", SogaProtocol.Version);
 
         var conversation = await server.Client("alice").OpenConversationAsync("bob");
 

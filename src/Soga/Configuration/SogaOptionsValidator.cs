@@ -35,6 +35,42 @@ internal sealed class SogaOptionsValidator : IValidateOptions<SogaOptions>
             failures.Add($"Soga:Messages:MaximumTextLength must be between 1 and {SogaOptions.AbsoluteMaximumTextLength}.");
         }
 
+        if (options.Messages.EditWindow is { } window && window <= TimeSpan.Zero)
+        {
+            failures.Add("Soga:Messages:EditWindow must be greater than zero, or unset for no limit.");
+        }
+
+        if (options.Conversations.MaximumMetadataBytes is < 2 or > SogaOptions.AbsoluteMaximumMetadataBytes)
+        {
+            failures.Add($"Soga:Conversations:MaximumMetadataBytes must be between 2 and {SogaOptions.AbsoluteMaximumMetadataBytes}.");
+        }
+
+        if (options.Conversations.MaximumMetadataProperties is < 1 or > 100)
+        {
+            failures.Add("Soga:Conversations:MaximumMetadataProperties must be between 1 and 100.");
+        }
+
+        if (options.Groups.MaximumParticipants is < 2 or > 10_000)
+        {
+            failures.Add("Soga:Groups:MaximumParticipants must be between 2 and 10000.");
+        }
+
+        if (options.Groups.MaximumTitleLength is < 1 or > SogaOptions.AbsoluteMaximumTitleLength)
+        {
+            failures.Add($"Soga:Groups:MaximumTitleLength must be between 1 and {SogaOptions.AbsoluteMaximumTitleLength}.");
+        }
+
+        if (options.Typing.Timeout <= TimeSpan.Zero || options.Typing.MinimumBroadcastInterval < TimeSpan.Zero ||
+            options.Typing.MinimumBroadcastInterval >= options.Typing.Timeout)
+        {
+            failures.Add("Soga:Typing:Timeout must be positive and greater than MinimumBroadcastInterval.");
+        }
+
+        if (options.Presence.OfflineGracePeriod < TimeSpan.Zero)
+        {
+            failures.Add("Soga:Presence:OfflineGracePeriod cannot be negative.");
+        }
+
         var outbox = options.Outbox;
         if (outbox.PollInterval <= TimeSpan.Zero)
         {

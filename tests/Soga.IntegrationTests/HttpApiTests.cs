@@ -77,7 +77,7 @@ public sealed class HttpApiTests
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
         Assert.Equal(SogaErrorCodes.IdempotencyConflict, await conflict.ErrorCodeAsync());
 
-        var list = await (await bob.GetAsync($"{P}/conversations")).ReadAsync<ConversationResponse[]>();
+        var list = (await (await bob.GetAsync($"{P}/conversations")).ReadAsync<ConversationPageResponse>()).Items;
         Assert.Equal(1, list.Single().UnreadCount);
         Assert.Equal(1, (await (await bob.GetAsync($"{P}/unread")).ReadAsync<UnreadResponse>()).TotalUnread);
 
@@ -152,7 +152,7 @@ public sealed class HttpApiTests
         var get = await crossTenant.GetAsync($"{P}/conversations/{inAcme.Id}");
         var history = await crossTenant.GetAsync($"{P}/conversations/{inAcme.Id}/messages");
         var sameUsersElsewhere = await crossTenant.OpenConversationAsync("bob");
-        var list = await (await crossTenant.GetAsync($"{P}/conversations")).ReadAsync<ConversationResponse[]>();
+        var list = (await (await crossTenant.GetAsync($"{P}/conversations")).ReadAsync<ConversationPageResponse>()).Items;
 
         Assert.Equal(HttpStatusCode.NotFound, get.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, history.StatusCode);

@@ -81,6 +81,42 @@ public sealed class DependencyTests
     }
 
     [Fact]
+    public void ExtensionPoints_ArePublicInterfacesThatDoNotExposePersistenceTypes()
+    {
+        var extensionPoints = new[]
+        {
+            typeof(Soga.Authorization.ISogaAuthorizationPolicy),
+            typeof(Soga.Extensibility.ISogaMessageValidator),
+            typeof(Soga.Extensibility.ISogaAuditSink),
+            typeof(Soga.Extensibility.ISogaEventSubscriber),
+            typeof(Soga.Extensibility.ISogaSystemMessages),
+            typeof(Soga.Extensibility.ISogaPresenceProvider),
+        };
+
+        foreach (var type in extensionPoints)
+        {
+            Assert.True(type.IsInterface && type.IsPublic, $"{type.Name} must be a public interface.");
+            var signatureTypes = type.GetMethods()
+                .SelectMany(m => m.GetParameters().Select(p => p.ParameterType).Append(m.ReturnType))
+                .SelectMany(t => t.IsGenericType ? t.GetGenericArguments().Append(t) : [t]);
+            Assert.DoesNotContain(
+                signatureTypes,
+                t => (t.Namespace ?? string.Empty).StartsWith("Soga.Persistence", StringComparison.Ordinal) ||
+                    (t.Namespace ?? string.Empty).StartsWith("Microsoft.EntityFrameworkCore", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
+    public void GroupRulesAndAuthorizer_AreInternal()
+    {
+        var leaked = Core.GetExportedTypes()
+            .Where(type => type.Namespace == "Soga.Groups" || type.Name.EndsWith("Rules", StringComparison.Ordinal) || type.Name.EndsWith("Authorizer", StringComparison.Ordinal))
+            .Select(type => type.FullName);
+
+        Assert.Empty(leaked);
+    }
+
+    [Fact]
     public void ErrorCodes_AreUniqueStableAndNamespaced()
     {
         var codes = typeof(SogaErrorCodes)

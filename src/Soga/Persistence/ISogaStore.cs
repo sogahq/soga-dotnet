@@ -1,8 +1,8 @@
 namespace Soga.Persistence;
 
 /// <summary>
-/// The persistence port. Every method is tenant-scoped, and every write is atomic: the message (or other change),
-/// its durable synchronization change, and its outbox event commit together or not at all.
+/// The persistence port. Every method is tenant-scoped, and every write is atomic: the change itself, its durable
+/// synchronization change(s), and its outbox event(s) commit together or not at all.
 /// </summary>
 internal interface ISogaStore
 {
@@ -13,14 +13,33 @@ internal interface ISogaStore
         CreateDirectConversationCommand command,
         CancellationToken cancellationToken);
 
-    /// <summary>Returns the conversation for an active participant, or <see langword="null"/> for a missing conversation and for non-participants alike.</summary>
+    Task<ConversationRecord> CreateGroupAsync(CreateGroupCommand command, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Applies a membership, role, update, or archive change. The store locks the conversation, loads a snapshot,
+    /// lets <c>GroupRules</c> decide, and applies the result in one transaction.
+    /// </summary>
+    Task<GroupMutationOutcome> MutateGroupAsync(GroupMutationCommand command, CancellationToken cancellationToken);
+
+    /// <summary>Returns the conversation with participants for an active participant, or <see langword="null"/> for a missing conversation and for non-participants alike.</summary>
     Task<ConversationRecord?> GetConversationAsync(
         string tenantId,
         string userId,
         Guid conversationId,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<ConversationRecord>> ListConversationsAsync(
+    /// <summary>Returns the caller's role and the conversation kind, or <see langword="null"/> when the caller is not an active participant. Cheap: it loads no participants or messages.</summary>
+    Task<ConversationAccess?> GetAccessAsync(
+        string tenantId,
+        string userId,
+        Guid conversationId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Lists conversations most recent first. Group participant lists are not loaded.</summary>
+    Task<ConversationPage> ListConversationsAsync(ListConversationsQuery query, CancellationToken cancellationToken);
+
+    /// <summary>Returns the IDs of conversations the user is an active participant of, most recent first.</summary>
+    Task<IReadOnlyList<Guid>> ListActiveConversationIdsAsync(
         string tenantId,
         string userId,
         int limit,
@@ -30,7 +49,11 @@ internal interface ISogaStore
         AppendMessageCommand command,
         CancellationToken cancellationToken);
 
-    /// <summary>Returns messages with sequence below <paramref name="beforeSequence"/>, newest first, or <see langword="null"/> when the user cannot access the conversation.</summary>
+    Task<EditMessageOutcome> EditMessageAsync(EditMessageCommand command, CancellationToken cancellationToken);
+
+    Task<DeleteMessageOutcome> DeleteMessageAsync(DeleteMessageCommand command, CancellationToken cancellationToken);
+
+    /// <summary>Returns messages with sequence below <paramref name="beforeSequence"/>, newest first (deleted ones as tombstones), or <see langword="null"/> when the user cannot access the conversation.</summary>
     Task<IReadOnlyList<MessageRecord>?> GetMessagesAsync(
         string tenantId,
         string userId,
@@ -48,7 +71,10 @@ internal interface ISogaStore
     /// <summary>Returns the newest committed change sequence for the tenant, or 0.</summary>
     Task<long> GetChangeHeadAsync(string tenantId, CancellationToken cancellationToken);
 
-    /// <summary>Returns changes after <paramref name="afterSequence"/> for conversations the user can access now.</summary>
+    /// <summary>
+    /// Returns changes after <paramref name="afterSequence"/> for conversations the user can access now, plus any
+    /// change addressed directly to the user (so a removed participant still learns they were removed).
+    /// </summary>
     Task<ChangePage> GetChangesAsync(
         string tenantId,
         string userId,

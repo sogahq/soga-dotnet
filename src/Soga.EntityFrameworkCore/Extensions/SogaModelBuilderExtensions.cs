@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Soga.Configuration;
 using Soga.EntityFrameworkCore.Entities;
@@ -9,6 +10,11 @@ namespace Soga.EntityFrameworkCore.Extensions;
 /// <summary>Adds Soga persistence mappings to a host-owned EF Core model.</summary>
 public static class SogaModelBuilderExtensions
 {
+    private static readonly ValueComparer<string> OrdinalIdentityComparer = new(
+        (left, right) => string.Equals(left, right, StringComparison.Ordinal),
+        value => value.GetHashCode(StringComparison.Ordinal),
+        value => value);
+
     /// <summary>
     /// Registers the Soga tables and constraints. Call it from the host <c>DbContext.OnModelCreating</c>; the host
     /// owns migrations and Soga never migrates a database on its own (ADR 0004, ADR 0005).
@@ -16,29 +22,63 @@ public static class SogaModelBuilderExtensions
     /// <param name="modelBuilder">The host model builder.</param>
     /// <param name="schema">An optional database schema.</param>
     /// <param name="tablePrefix">The prefix of every Soga table. Defaults to <c>Soga</c>.</param>
-    public static ModelBuilder AddSoga(this ModelBuilder modelBuilder, string? schema = null, string tablePrefix = "Soga")
+    /// <param name="identityCollation">
+    /// A case-sensitive collation applied to every identity column (tenant, user, and client message IDs). Soga compares
+    /// identities ordinally, so <c>Alice</c> and <c>alice</c> are different users. PostgreSQL and SQLite already behave this way.
+    /// <b>SQL Server is case-insensitive by default and requires this</b>, for example <c>"Latin1_General_100_BIN2"</c>;
+    /// Soga refuses to start on SQL Server without it, because otherwise two different users could share one identity.
+    /// </param>
+    public static ModelBuilder AddSoga(
+        this ModelBuilder modelBuilder,
+        string? schema = null,
+        string tablePrefix = "Soga",
+        string? identityCollation = null)
     {
         ArgumentNullException.ThrowIfNull(modelBuilder);
         ArgumentException.ThrowIfNullOrWhiteSpace(tablePrefix);
+
+        // Identity columns compare ordinally when a collation is given. Everything that names a person, tenant, or
+        // idempotency key goes through here so none can be forgotten.
+        PropertyBuilder<T> Ident<T>(PropertyBuilder<T> property, int length)
+        {
+            property.HasMaxLength(length);
+            if (identityCollation is null)
+            {
+                return property;
+            }
+
+            // The collation fixes how the database compares. EF also compares keys in memory when it tracks entities, and its
+            // SQL Server provider assumes a case-insensitive default, which would merge "Alice" and "alice" in the identity
+            // map. Force ordinal comparison there too.
+            property.UseCollation(identityCollation);
+            property.Metadata.SetValueComparer(OrdinalIdentityComparer);
+            return property;
+        }
 
         modelBuilder.Entity<ConversationRow>(entity =>
         {
             entity.ToTable($"{tablePrefix}Conversations", schema);
             entity.HasKey(x => new { x.TenantId, x.Id });
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
-            entity.Property(x => x.DirectKey).HasMaxLength(64);
-            entity.Property(x => x.ExternalReference).HasMaxLength(SogaOptions.MaximumExternalReferenceLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.DirectKey), 64);
+            Ident(entity.Property(x => x.ExternalReference), SogaOptions.MaximumExternalReferenceLength);
+            entity.Property(x => x.Kind).HasMaxLength(10);
+            entity.Property(x => x.Title).HasMaxLength(SogaOptions.AbsoluteMaximumTitleLength);
+            entity.Property(x => x.MetadataJson).HasMaxLength(SogaOptions.AbsoluteMaximumMetadataBytes);
             entity.Property(x => x.CreatedAt).HasConversion<UtcDateTimeConverter>();
             entity.Property(x => x.LastActivityAt).HasConversion<UtcDateTimeConverter>();
+            entity.Property(x => x.ArchivedAt).HasConversion<NullableUtcDateTimeConverter>();
             entity.HasIndex(x => new { x.TenantId, x.DirectKey }).IsUnique();
+            entity.HasIndex(x => new { x.TenantId, x.ExternalReference });
         });
 
         modelBuilder.Entity<ParticipantRow>(entity =>
         {
             entity.ToTable($"{tablePrefix}Participants", schema);
             entity.HasKey(x => new { x.TenantId, x.ConversationId, x.UserId });
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
-            entity.Property(x => x.UserId).HasMaxLength(SogaOptions.MaximumUserIdLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.UserId), SogaOptions.MaximumUserIdLength);
+            entity.Property(x => x.Role).HasConversion<string>().HasMaxLength(10);
             entity.Property(x => x.JoinedAt).HasConversion<UtcDateTimeConverter>();
             entity.Property(x => x.LeftAt).HasConversion<NullableUtcDateTimeConverter>();
             entity.Property(x => x.LastReadAt).HasConversion<NullableUtcDateTimeConverter>();
@@ -50,26 +90,45 @@ public static class SogaModelBuilderExtensions
         {
             entity.ToTable($"{tablePrefix}Messages", schema);
             entity.HasKey(x => new { x.TenantId, x.Id });
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
-            entity.Property(x => x.SenderId).HasMaxLength(SogaOptions.MaximumUserIdLength);
-            entity.Property(x => x.ClientMessageId).HasMaxLength(SogaOptions.MaximumClientMessageIdLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.SenderId), SogaOptions.MaximumUserIdLength);
+            Ident(entity.Property(x => x.ClientMessageId), SogaOptions.MaximumClientMessageIdLength);
+            Ident(entity.Property(x => x.DeletedBy), SogaOptions.MaximumUserIdLength);
             entity.Property(x => x.Kind).HasMaxLength(20);
             entity.Property(x => x.Content).HasMaxLength(SogaOptions.AbsoluteMaximumTextLength);
             entity.Property(x => x.CreatedAt).HasConversion<UtcDateTimeConverter>();
+            entity.Property(x => x.EditedAt).HasConversion<NullableUtcDateTimeConverter>();
+            entity.Property(x => x.DeletedAt).HasConversion<NullableUtcDateTimeConverter>();
             entity.HasIndex(x => new { x.TenantId, x.ConversationId, x.Sequence }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.ConversationId, x.SenderId, x.ClientMessageId }).IsUnique();
             ReferenceConversation(entity);
+        });
+
+        modelBuilder.Entity<MessageEditRow>(entity =>
+        {
+            entity.ToTable($"{tablePrefix}MessageEdits", schema);
+            entity.HasKey(x => new { x.TenantId, x.MessageId, x.Version });
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
+            entity.Property(x => x.PreviousContent).HasMaxLength(SogaOptions.AbsoluteMaximumTextLength);
+            entity.Property(x => x.EditedAt).HasConversion<UtcDateTimeConverter>();
+            entity.HasOne<MessageRow>()
+                .WithMany()
+                .HasForeignKey("TenantId", "MessageId")
+                .HasPrincipalKey(nameof(MessageRow.TenantId), nameof(MessageRow.Id))
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         modelBuilder.Entity<ChangeRow>(entity =>
         {
             entity.ToTable($"{tablePrefix}Changes", schema);
             entity.HasKey(x => new { x.TenantId, x.Sequence });
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.TargetUserId), SogaOptions.MaximumUserIdLength);
             entity.Property(x => x.Sequence).ValueGeneratedNever();
             entity.Property(x => x.ChangeType).HasMaxLength(100);
             entity.Property(x => x.OccurredAt).HasConversion<UtcDateTimeConverter>();
             entity.HasIndex(x => new { x.TenantId, x.ConversationId, x.Sequence });
+            entity.HasIndex(x => new { x.TenantId, x.TargetUserId, x.Sequence });
             entity.HasIndex(x => x.EventId).IsUnique();
             ReferenceConversation(entity);
         });
@@ -78,14 +137,14 @@ public static class SogaModelBuilderExtensions
         {
             entity.ToTable($"{tablePrefix}TenantState", schema);
             entity.HasKey(x => x.TenantId);
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
         });
 
         modelBuilder.Entity<OutboxRow>(entity =>
         {
             entity.ToTable($"{tablePrefix}Outbox", schema);
             entity.HasKey(x => new { x.TenantId, x.Id });
-            entity.Property(x => x.TenantId).HasMaxLength(SogaOptions.MaximumTenantIdLength);
+            Ident(entity.Property(x => x.TenantId), SogaOptions.MaximumTenantIdLength);
             entity.Property(x => x.EventType).HasMaxLength(200);
             entity.Property(x => x.LastFailure).HasMaxLength(200);
             entity.Property(x => x.OccurredAt).HasConversion<UtcDateTimeConverter>();

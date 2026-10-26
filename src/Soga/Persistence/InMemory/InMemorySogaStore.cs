@@ -1,12 +1,15 @@
 using Soga.Contracts;
 using Soga.Conversations;
+using Soga.Groups;
+using Soga.Messages;
 using Soga.Synchronization;
 
 namespace Soga.Persistence.InMemory;
 
 /// <summary>
 /// A single-process development provider. It offers the same guarantees as the relational provider
-/// (atomic message, change, and outbox writes; idempotency; ordering) but loses all data on restart.
+/// (atomic message, change, and outbox writes; idempotency; ordering; the same group and message rules) but loses
+/// all data on restart.
 /// </summary>
 internal sealed class InMemorySogaStore : ISogaStore
 {
@@ -15,8 +18,18 @@ internal sealed class InMemorySogaStore : ISogaStore
     private readonly Dictionary<(string Tenant, string Key), Guid> _directIndex = [];
     private readonly Dictionary<string, List<ChangeEntry>> _changes = [];
     private readonly List<OutboxEntry> _outbox = [];
+    private readonly List<EditAudit> _edits = [];
 
     public bool IsDurable => false;
+
+    /// <summary>The previous texts kept for a message when edit history retention is on. For tests and diagnostics.</summary>
+    internal IReadOnlyList<string> GetEditHistory(Guid messageId)
+    {
+        lock (_gate)
+        {
+            return [.. _edits.Where(e => e.MessageId == messageId).OrderBy(e => e.Version).Select(e => e.PreviousContent)];
+        }
+    }
 
     public Task<DirectConversationOutcome> GetOrCreateDirectConversationAsync(
         CreateDirectConversationCommand command,
@@ -30,17 +43,20 @@ internal sealed class InMemorySogaStore : ISogaStore
             if (_directIndex.TryGetValue((command.TenantId, key), out var existingId))
             {
                 var existing = _conversations[(command.TenantId, existingId)];
-                return Task.FromResult(new DirectConversationOutcome(ToRecord(existing, command.UserId), false));
+                return Task.FromResult(new DirectConversationOutcome(ToRecord(existing, command.UserId, includeParticipants: true), false));
             }
 
             var conversation = new ConversationState(
                 command.ConversationId,
                 command.TenantId,
+                SogaConversationKinds.Direct,
+                title: null,
                 command.ExternalReference,
+                command.MetadataJson,
                 command.Now);
             foreach (var participant in new[] { command.UserId, command.OtherUserId }.Order(StringComparer.Ordinal))
             {
-                conversation.Participants.Add(new ParticipantState(participant, command.Now));
+                conversation.Participants.Add(new ParticipantState(participant, SogaRole.Member, command.Now));
             }
 
             _conversations[(command.TenantId, conversation.Id)] = conversation;
@@ -51,11 +67,139 @@ internal sealed class InMemorySogaStore : ISogaStore
                 SogaEventFactory.ConversationCreated(
                     command.EventId,
                     conversation.Id,
-                    conversation.Participants.Select(p => p.UserId).ToArray(),
+                    [.. conversation.Participants.Select(p => p.UserId)],
                     conversation.ExternalReference,
                     command.Now));
 
-            return Task.FromResult(new DirectConversationOutcome(ToRecord(conversation, command.UserId), true));
+            return Task.FromResult(new DirectConversationOutcome(ToRecord(conversation, command.UserId, includeParticipants: true), true));
+        }
+    }
+
+    public Task<ConversationRecord> CreateGroupAsync(CreateGroupCommand command, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var conversation = new ConversationState(
+                command.ConversationId,
+                command.TenantId,
+                SogaConversationKinds.Group,
+                command.Title,
+                command.ExternalReference,
+                command.MetadataJson,
+                command.Now);
+
+            conversation.Participants.Add(new ParticipantState(command.UserId, SogaRole.Owner, command.Now));
+            foreach (var other in command.OtherParticipantIds.Distinct(StringComparer.Ordinal).Where(id => id != command.UserId))
+            {
+                conversation.Participants.Add(new ParticipantState(other, SogaRole.Member, command.Now));
+            }
+
+            _conversations[(command.TenantId, conversation.Id)] = conversation;
+            Publish(
+                command.TenantId,
+                SogaEventFactory.ConversationCreated(
+                    command.EventId,
+                    conversation.Id,
+                    [.. conversation.Participants.Select(p => p.UserId).Order(StringComparer.Ordinal)],
+                    conversation.ExternalReference,
+                    command.Now,
+                    SogaConversationKinds.Group,
+                    conversation.Title));
+
+            return Task.FromResult(ToRecord(conversation, command.UserId, includeParticipants: true));
+        }
+    }
+
+    public Task<GroupMutationOutcome> MutateGroupAsync(GroupMutationCommand command, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!_conversations.TryGetValue((command.TenantId, command.ConversationId), out var conversation))
+            {
+                return Task.FromResult(new GroupMutationOutcome(GroupError.NotFound, false, null));
+            }
+
+            var snapshot = new GroupSnapshot(
+                conversation.Kind == SogaConversationKinds.Group,
+                conversation.ArchivedAt is not null,
+                conversation.Title,
+                conversation.MetadataJson,
+                [.. conversation.Participants.Select(p => new ParticipantSnapshot(p.UserId, p.Role, p.LeftAt is null))]);
+
+            var decision = GroupRules.Decide(snapshot, command.ActorId, command.Mutation, command.MaximumParticipants);
+            if (decision.Error != GroupError.None)
+            {
+                return Task.FromResult(new GroupMutationOutcome(decision.Error, false, null));
+            }
+
+            if (!decision.Changed)
+            {
+                return Task.FromResult(new GroupMutationOutcome(GroupError.None, false, ToRecord(conversation, command.ActorId, includeParticipants: true)));
+            }
+
+            switch (command.Mutation)
+            {
+                case AddParticipantMutation add:
+                    var existing = conversation.Participants.FirstOrDefault(p => p.UserId == add.UserId);
+                    if (existing is null)
+                    {
+                        conversation.Participants.Add(new ParticipantState(add.UserId, add.Role, command.Now) { LastReadSequence = conversation.LastSequence });
+                    }
+                    else
+                    {
+                        existing.LeftAt = null;
+                        existing.Role = add.Role;
+                        existing.JoinedAt = command.Now;
+                        existing.LastReadSequence = conversation.LastSequence;
+                    }
+
+                    break;
+                case RemoveParticipantMutation remove:
+                    conversation.Participants.First(p => p.UserId == remove.UserId).LeftAt = command.Now;
+                    break;
+                case ChangeRoleMutation change:
+                    conversation.Participants.First(p => p.UserId == change.UserId && p.LeftAt is null).Role = change.Role;
+                    break;
+                case UpdateConversationMutation update:
+                    if (update.SetTitle)
+                    {
+                        conversation.Title = update.Title;
+                    }
+
+                    if (update.SetMetadata)
+                    {
+                        conversation.MetadataJson = update.MetadataJson;
+                    }
+
+                    break;
+                case ArchiveMutation archive:
+                    conversation.ArchivedAt = archive.Archived ? command.Now : null;
+                    break;
+            }
+
+            var first = true;
+            foreach (var plan in decision.Events)
+            {
+                var eventId = first ? command.EventId : command.Ids.NewId();
+                first = false;
+                Publish(
+                    command.TenantId,
+                    SogaEventFactory.FromPlan(eventId, conversation.Id, plan, command.Now),
+                    plan.TargetUserId);
+
+                if (command.PostSystemMessage && plan.Data is ParticipantChangedData participantChange)
+                {
+                    AppendSystemMessage(conversation, command.TenantId, command.Ids, SystemMessageContent.ForParticipantChange(participantChange), command.Now);
+                }
+            }
+
+            var stillActive = conversation.Participants.Any(p => p.UserId == command.ActorId && p.LeftAt is null);
+            return Task.FromResult(new GroupMutationOutcome(
+                GroupError.None,
+                true,
+                stillActive ? ToRecord(conversation, command.ActorId, includeParticipants: true) : null));
         }
     }
 
@@ -69,11 +213,63 @@ internal sealed class InMemorySogaStore : ISogaStore
         lock (_gate)
         {
             var conversation = FindAccessible(tenantId, userId, conversationId);
-            return Task.FromResult(conversation is null ? null : ToRecord(conversation, userId));
+            return Task.FromResult(conversation is null ? null : ToRecord(conversation, userId, includeParticipants: true));
         }
     }
 
-    public Task<IReadOnlyList<ConversationRecord>> ListConversationsAsync(
+    public Task<ConversationAccess?> GetAccessAsync(
+        string tenantId,
+        string userId,
+        Guid conversationId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var conversation = FindAccessible(tenantId, userId, conversationId);
+            var access = conversation is null
+                ? null
+                : new ConversationAccess(
+                    conversation.Kind,
+                    conversation.Participants.Single(p => p.UserId == userId && p.LeftAt is null).Role,
+                    conversation.ArchivedAt is not null,
+                    conversation.ExternalReference);
+            return Task.FromResult(access);
+        }
+    }
+
+    public Task<ConversationPage> ListConversationsAsync(ListConversationsQuery query, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var matches = _conversations.Values
+                .Where(c => c.TenantId == query.TenantId && IsActiveParticipant(c, query.UserId))
+                .Where(c => query.Kind is null || c.Kind == query.Kind)
+                .Where(c => query.ExternalReference is null || c.ExternalReference == query.ExternalReference)
+                .Where(c => query.State switch
+                {
+                    ConversationStateFilter.Active => c.ArchivedAt is null,
+                    ConversationStateFilter.Archived => c.ArchivedAt is not null,
+                    _ => true,
+                })
+                .Where(c => query.AfterActivity is null || c.LastActivityAt <= query.AfterActivity)
+                .OrderByDescending(c => c.LastActivityAt)
+                .ThenByDescending(c => c.Id)
+                .Skip(query.SkipTies)
+                .Take(query.Limit + 1)
+                .ToList();
+
+            var hasMore = matches.Count > query.Limit;
+            var items = matches
+                .Take(query.Limit)
+                .Select(c => ToRecord(c, query.UserId, includeParticipants: c.Kind == SogaConversationKinds.Direct))
+                .ToList();
+            return Task.FromResult(new ConversationPage(items, hasMore));
+        }
+    }
+
+    public Task<IReadOnlyList<Guid>> ListActiveConversationIdsAsync(
         string tenantId,
         string userId,
         int limit,
@@ -82,14 +278,14 @@ internal sealed class InMemorySogaStore : ISogaStore
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            IReadOnlyList<ConversationRecord> result = _conversations.Values
+            IReadOnlyList<Guid> ids = _conversations.Values
                 .Where(c => c.TenantId == tenantId && IsActiveParticipant(c, userId))
                 .OrderByDescending(c => c.LastActivityAt)
                 .ThenByDescending(c => c.Id)
                 .Take(limit)
-                .Select(c => ToRecord(c, userId))
+                .Select(c => c.Id)
                 .ToList();
-            return Task.FromResult(result);
+            return Task.FromResult(ids);
         }
     }
 
@@ -100,7 +296,9 @@ internal sealed class InMemorySogaStore : ISogaStore
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
-            var conversation = FindAccessible(command.TenantId, command.UserId, command.ConversationId);
+            var conversation = command.IsSystem
+                ? _conversations.GetValueOrDefault((command.TenantId, command.ConversationId))
+                : FindAccessible(command.TenantId, command.UserId, command.ConversationId);
             if (conversation is null)
             {
                 return Task.FromResult(new AppendMessageOutcome(AppendStatus.ConversationNotFound, null));
@@ -110,10 +308,24 @@ internal sealed class InMemorySogaStore : ISogaStore
                 m.SenderId == command.UserId && m.ClientMessageId == command.ClientMessageId);
             if (existing is not null)
             {
-                var status = string.Equals(existing.Content, command.Content, StringComparison.Ordinal)
+                var status = existing.IsDeleted || string.Equals(existing.Content, command.Content, StringComparison.Ordinal)
                     ? AppendStatus.Duplicate
                     : AppendStatus.IdempotencyConflict;
-                return Task.FromResult(new AppendMessageOutcome(status, existing));
+                return Task.FromResult(new AppendMessageOutcome(status, Hydrate(conversation, existing)));
+            }
+
+            if (conversation.ArchivedAt is not null && !command.IsSystem)
+            {
+                return Task.FromResult(new AppendMessageOutcome(AppendStatus.Archived, null));
+            }
+
+            if (command.ReplyToMessageId is { } replyId)
+            {
+                var target = conversation.Messages.FirstOrDefault(m => m.Id == replyId);
+                if (target is null || target.IsDeleted)
+                {
+                    return Task.FromResult(new AppendMessageOutcome(AppendStatus.ReplyInvalid, null));
+                }
             }
 
             conversation.LastSequence++;
@@ -125,11 +337,119 @@ internal sealed class InMemorySogaStore : ISogaStore
                 command.UserId,
                 command.ClientMessageId,
                 command.Content,
-                command.Now);
+                command.Now,
+                command.IsSystem ? SogaMessageKinds.System : SogaMessageKinds.Text,
+                ReplyToMessageId: command.ReplyToMessageId);
             conversation.Messages.Add(message);
 
-            Publish(command.TenantId, SogaEventFactory.MessageCreated(command.EventId, message, command.Now));
-            return Task.FromResult(new AppendMessageOutcome(AppendStatus.Created, message));
+            Publish(command.TenantId, SogaEventFactory.MessageCreated(command.EventId, Hydrate(conversation, message), command.Now));
+            return Task.FromResult(new AppendMessageOutcome(AppendStatus.Created, Hydrate(conversation, message)));
+        }
+    }
+
+    public Task<EditMessageOutcome> EditMessageAsync(EditMessageCommand command, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var conversation = FindAccessible(command.TenantId, command.UserId, command.ConversationId);
+            if (conversation is null)
+            {
+                return Task.FromResult(new EditMessageOutcome(EditStatus.ConversationNotFound, null));
+            }
+
+            var index = conversation.Messages.FindIndex(m => m.Id == command.MessageId);
+            if (index < 0)
+            {
+                return Task.FromResult(new EditMessageOutcome(EditStatus.MessageNotFound, null));
+            }
+
+            var message = conversation.Messages[index];
+            var check = MessageRules.CanEdit(
+                message.Kind,
+                message.SenderId,
+                message.CreatedAt,
+                message.IsDeleted,
+                command.UserId,
+                command.Now,
+                command.EditWindow);
+            if (check != EditCheck.Allowed)
+            {
+                var status = check switch
+                {
+                    EditCheck.Forbidden => EditStatus.Forbidden,
+                    EditCheck.WindowExpired => EditStatus.WindowExpired,
+                    _ => EditStatus.NotEditable,
+                };
+                return Task.FromResult(new EditMessageOutcome(status, null));
+            }
+
+            if (string.Equals(message.Content, command.Text, StringComparison.Ordinal))
+            {
+                return Task.FromResult(new EditMessageOutcome(EditStatus.Unchanged, Hydrate(conversation, message)));
+            }
+
+            if (command.RetainHistory)
+            {
+                _edits.Add(new EditAudit(message.Id, _edits.Count(e => e.MessageId == message.Id) + 1, message.Content, command.Now));
+            }
+
+            var updated = message with { Content = command.Text, EditedAt = command.Now };
+            conversation.Messages[index] = updated;
+            Publish(command.TenantId, SogaEventFactory.MessageUpdated(command.EventId, Hydrate(conversation, updated), command.Now));
+            return Task.FromResult(new EditMessageOutcome(EditStatus.Updated, Hydrate(conversation, updated)));
+        }
+    }
+
+    public Task<DeleteMessageOutcome> DeleteMessageAsync(DeleteMessageCommand command, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            var conversation = FindAccessible(command.TenantId, command.UserId, command.ConversationId);
+            if (conversation is null)
+            {
+                return Task.FromResult(new DeleteMessageOutcome(DeleteStatus.ConversationNotFound, false, null));
+            }
+
+            var index = conversation.Messages.FindIndex(m => m.Id == command.MessageId);
+            if (index < 0)
+            {
+                return Task.FromResult(new DeleteMessageOutcome(DeleteStatus.MessageNotFound, false, null));
+            }
+
+            var message = conversation.Messages[index];
+            var actor = conversation.Participants.Single(p => p.UserId == command.UserId && p.LeftAt is null);
+            var check = MessageRules.CanDelete(
+                message.Kind,
+                message.SenderId,
+                message.IsDeleted,
+                command.UserId,
+                actor.Role,
+                conversation.Kind == SogaConversationKinds.Group,
+                command.AllowOwnDeletion,
+                command.AllowAdminDeletion);
+
+            switch (check)
+            {
+                case DeleteCheck.Forbidden:
+                    return Task.FromResult(new DeleteMessageOutcome(DeleteStatus.Forbidden, false, message.SenderId));
+                case DeleteCheck.NotDeletable:
+                    return Task.FromResult(new DeleteMessageOutcome(DeleteStatus.NotDeletable, false, message.SenderId));
+                case DeleteCheck.AlreadyDeleted:
+                    return Task.FromResult(new DeleteMessageOutcome(DeleteStatus.AlreadyDeleted, false, message.SenderId));
+            }
+
+            // The text is erased so a deleted message never exposes its content again. The row stays as a tombstone
+            // so sequences remain contiguous and replies can say "deleted".
+            var deleted = message with { Content = string.Empty, DeletedAt = command.Now, DeletedBy = command.UserId };
+            conversation.Messages[index] = deleted;
+            _edits.RemoveAll(e => e.MessageId == message.Id); // Retained edit history must not keep deleted text alive.
+            Publish(command.TenantId, SogaEventFactory.MessageDeleted(command.EventId, deleted, command.UserId, command.Now));
+            return Task.FromResult(new DeleteMessageOutcome(
+                DeleteStatus.Deleted,
+                !string.Equals(message.SenderId, command.UserId, StringComparison.Ordinal),
+                message.SenderId));
         }
     }
 
@@ -154,6 +474,7 @@ internal sealed class InMemorySogaStore : ISogaStore
                 .Where(m => beforeSequence is null || m.Sequence < beforeSequence)
                 .OrderByDescending(m => m.Sequence)
                 .Take(limit)
+                .Select(m => Hydrate(conversation, m))
                 .ToList();
             return Task.FromResult<IReadOnlyList<MessageRecord>?>(page);
         }
@@ -178,7 +499,7 @@ internal sealed class InMemorySogaStore : ISogaStore
                 return Task.FromResult(new AdvanceReadOutcome(AdvanceStatus.MessageNotFound, 0, 0));
             }
 
-            var participant = conversation.Participants.Single(p => p.UserId == command.UserId);
+            var participant = conversation.Participants.Single(p => p.UserId == command.UserId && p.LeftAt is null);
             var advanced = message.Sequence > participant.LastReadSequence;
             if (advanced)
             {
@@ -207,7 +528,7 @@ internal sealed class InMemorySogaStore : ISogaStore
         {
             var total = _conversations.Values
                 .Where(c => c.TenantId == tenantId && IsActiveParticipant(c, userId))
-                .Sum(c => Unread(c, c.Participants.Single(p => p.UserId == userId)));
+                .Sum(c => Unread(c, c.Participants.Single(p => p.UserId == userId && p.LeftAt is null)));
             return Task.FromResult(total);
         }
     }
@@ -239,8 +560,9 @@ internal sealed class InMemorySogaStore : ISogaStore
 
             var visible = list
                 .Where(c => c.Sequence > afterSequence &&
-                    _conversations.TryGetValue((tenantId, c.ConversationId), out var conversation) &&
-                    IsActiveParticipant(conversation, userId))
+                    (c.TargetUserId == userId ||
+                        (_conversations.TryGetValue((tenantId, c.ConversationId), out var conversation) &&
+                            IsActiveParticipant(conversation, userId))))
                 .Take(limit + 1)
                 .ToList();
 
@@ -347,7 +669,30 @@ internal sealed class InMemorySogaStore : ISogaStore
 
     public Task<bool> CheckHealthAsync(CancellationToken cancellationToken) => Task.FromResult(true);
 
-    private void Publish(string tenantId, SogaEvent evt)
+    private void AppendSystemMessage(
+        ConversationState conversation,
+        string tenantId,
+        Abstractions.ISogaIdGenerator ids,
+        string content,
+        DateTimeOffset now)
+    {
+        var messageId = ids.NewId();
+        conversation.LastSequence++;
+        conversation.LastActivityAt = now;
+        var message = new MessageRecord(
+            messageId,
+            conversation.Id,
+            conversation.LastSequence,
+            SogaSystemSender.UserId,
+            $"sys:{messageId:N}",
+            content,
+            now,
+            SogaMessageKinds.System);
+        conversation.Messages.Add(message);
+        Publish(tenantId, SogaEventFactory.MessageCreated(ids.NewId(), message, now));
+    }
+
+    private void Publish(string tenantId, SogaEvent evt, string? targetUserId = null)
     {
         var payload = SogaEventSerializer.Serialize(evt);
 
@@ -358,7 +703,7 @@ internal sealed class InMemorySogaStore : ISogaStore
         }
 
         var sequence = list.Count == 0 ? 1 : list[^1].Sequence + 1;
-        list.Add(new ChangeEntry(sequence, evt.EventId, evt.ConversationId, payload));
+        list.Add(new ChangeEntry(sequence, evt.EventId, evt.ConversationId, payload, targetUserId));
         _outbox.Add(new OutboxEntry(evt.EventId, tenantId, evt.Type, payload, evt.OccurredAt));
     }
 
@@ -372,43 +717,85 @@ internal sealed class InMemorySogaStore : ISogaStore
         conversation.Participants.Any(p => p.UserId == userId && p.LeftAt is null);
 
     private static long Unread(ConversationState conversation, ParticipantState participant) =>
-        conversation.Messages.Count(m => m.Sequence > participant.LastReadSequence && m.SenderId != participant.UserId);
+        conversation.Messages.Count(m =>
+            m.Sequence > participant.LastReadSequence && m.SenderId != participant.UserId && !m.IsDeleted);
 
-    private static ConversationRecord ToRecord(ConversationState conversation, string userId)
+    private static MessageRecord Hydrate(ConversationState conversation, MessageRecord message)
     {
-        var participant = conversation.Participants.Single(p => p.UserId == userId);
-        return new ConversationRecord(
-            conversation.Id,
-            conversation.ExternalReference,
-            conversation.Participants.Where(p => p.LeftAt is null).Select(p => p.UserId).ToArray(),
-            conversation.CreatedAt,
-            conversation.LastActivityAt,
-            conversation.LastSequence,
-            participant.LastReadSequence,
-            Unread(conversation, participant));
+        if (message.ReplyToMessageId is not { } replyId)
+        {
+            return message;
+        }
+
+        var target = conversation.Messages.FirstOrDefault(m => m.Id == replyId);
+        return target is null
+            ? message
+            : message with { ReplyTo = new ReplyInfo(target.Id, target.SenderId, SogaText.Snippet(target.Content), target.IsDeleted) };
     }
 
-    private sealed class ConversationState(Guid id, string tenantId, string? externalReference, DateTimeOffset createdAt)
+    private static ConversationRecord ToRecord(ConversationState conversation, string userId, bool includeParticipants)
+    {
+        var mine = conversation.Participants.Single(p => p.UserId == userId && p.LeftAt is null);
+        var active = conversation.Participants.Where(p => p.LeftAt is null).ToList();
+        var last = conversation.Messages.Count == 0 ? null : conversation.Messages.MaxBy(m => m.Sequence);
+
+        return new ConversationRecord(
+            conversation.Id,
+            conversation.Kind,
+            conversation.Title,
+            conversation.ExternalReference,
+            conversation.MetadataJson,
+            includeParticipants
+                ? [.. active.OrderBy(p => p.UserId, StringComparer.Ordinal).Select(p => new ParticipantInfo(p.UserId, p.Role, p.JoinedAt))]
+                : [],
+            active.Count,
+            conversation.CreatedAt,
+            conversation.LastActivityAt,
+            conversation.ArchivedAt,
+            conversation.LastSequence,
+            mine.LastReadSequence,
+            Unread(conversation, mine),
+            mine.Role,
+            last is null
+                ? null
+                : new MessageSummary(last.Id, last.Sequence, last.SenderId, last.Kind, SogaText.Snippet(last.Content), last.CreatedAt, last.IsDeleted));
+    }
+
+    private sealed class ConversationState(
+        Guid id,
+        string tenantId,
+        string kind,
+        string? title,
+        string? externalReference,
+        string? metadataJson,
+        DateTimeOffset createdAt)
     {
         public Guid Id { get; } = id;
         public string TenantId { get; } = tenantId;
+        public string Kind { get; } = kind;
+        public string? Title { get; set; } = title;
         public string? ExternalReference { get; } = externalReference;
+        public string? MetadataJson { get; set; } = metadataJson;
         public DateTimeOffset CreatedAt { get; } = createdAt;
+        public DateTimeOffset? ArchivedAt { get; set; }
         public DateTimeOffset LastActivityAt { get; set; } = createdAt;
         public long LastSequence { get; set; }
         public List<ParticipantState> Participants { get; } = [];
         public List<MessageRecord> Messages { get; } = [];
     }
 
-    private sealed class ParticipantState(string userId, DateTimeOffset joinedAt)
+    private sealed class ParticipantState(string userId, SogaRole role, DateTimeOffset joinedAt)
     {
         public string UserId { get; } = userId;
-        public DateTimeOffset JoinedAt { get; } = joinedAt;
+        public SogaRole Role { get; set; } = role;
+        public DateTimeOffset JoinedAt { get; set; } = joinedAt;
         public DateTimeOffset? LeftAt { get; set; }
         public long LastReadSequence { get; set; }
     }
 
-    private sealed record ChangeEntry(long Sequence, Guid EventId, Guid ConversationId, string Payload);
+    private sealed record ChangeEntry(long Sequence, Guid EventId, Guid ConversationId, string Payload, string? TargetUserId);
+
+    private sealed record EditAudit(Guid MessageId, int Version, string PreviousContent, DateTimeOffset EditedAt);
 
     private sealed class OutboxEntry(Guid id, string tenantId, string eventType, string payload, DateTimeOffset occurredAt)
     {

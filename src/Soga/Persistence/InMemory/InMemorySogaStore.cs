@@ -353,7 +353,8 @@ internal sealed class InMemorySogaStore : ISogaStore
                 m.SenderId == command.UserId && m.ClientMessageId == command.ClientMessageId);
             if (existing is not null)
             {
-                var status = existing.IsDeleted || string.Equals(existing.Content, command.Content, StringComparison.Ordinal)
+                // Compare with the text as first sent, not the current text, so an edit does not break retries (ADR 0011).
+                var status = existing.IsDeleted || SogaText.IsSameSend(existing.SentFingerprint, existing.Content, command.Content)
                     ? AppendStatus.Duplicate
                     : AppendStatus.IdempotencyConflict;
                 return Task.FromResult(new AppendMessageOutcome(status, Hydrate(conversation, existing)));
@@ -384,7 +385,8 @@ internal sealed class InMemorySogaStore : ISogaStore
                 command.Content,
                 command.Now,
                 command.IsSystem ? SogaMessageKinds.System : SogaMessageKinds.Text,
-                ReplyToMessageId: command.ReplyToMessageId);
+                ReplyToMessageId: command.ReplyToMessageId,
+                SentFingerprint: SogaText.Fingerprint(command.Content));
             conversation.Messages.Add(message);
 
             Publish(command.TenantId, SogaEventFactory.MessageCreated(command.EventId, Hydrate(conversation, message), command.Now));
@@ -489,7 +491,7 @@ internal sealed class InMemorySogaStore : ISogaStore
 
             // The text is erased so a deleted message never exposes its content again. The row stays as a tombstone
             // so sequences remain contiguous and replies can say "deleted".
-            var deleted = message with { Content = string.Empty, DeletedAt = command.Now, DeletedBy = command.UserId };
+            var deleted = message with { Content = string.Empty, SentFingerprint = null, DeletedAt = command.Now, DeletedBy = command.UserId };
             conversation.Messages[index] = deleted;
             _edits.RemoveAll(e => e.MessageId == message.Id); // Retained edit history must not keep deleted text alive.
             Publish(command.TenantId, SogaEventFactory.MessageDeleted(command.EventId, deleted, command.UserId, command.Now));
@@ -637,8 +639,8 @@ internal sealed class InMemorySogaStore : ISogaStore
             var due = _outbox
                 .Where(o => o.PublishedAt is null && o.FailedAt is null && o.AvailableAt <= now &&
                     (o.LeaseUntil is null || o.LeaseUntil <= now))
+                // OrderBy is stable and the list is in commit order, so events with the same timestamp keep their commit order.
                 .OrderBy(o => o.OccurredAt)
-                .ThenBy(o => o.Id)
                 .Take(batchSize)
                 .ToList();
 
@@ -755,7 +757,8 @@ internal sealed class InMemorySogaStore : ISogaStore
             $"sys:{messageId:N}",
             content,
             now,
-            SogaMessageKinds.System);
+            SogaMessageKinds.System,
+            SentFingerprint: SogaText.Fingerprint(content));
         conversation.Messages.Add(message);
         Publish(tenantId, SogaEventFactory.MessageCreated(ids.NewId(), message, now));
     }

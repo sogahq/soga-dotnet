@@ -21,14 +21,19 @@ internal sealed partial class EfSogaStore<TContext>
         TimeSpan leaseDuration,
         CancellationToken cancellationToken)
     {
-        var candidates = await _db.Set<OutboxRow>()
-            .AsNoTracking()
-            .Where(o => o.PublishedAt == null &&
+        // Oldest first. Events with the same timestamp are ordered by their change-log sequence, which is commit order,
+        // so a conversation is never announced after a message sent in it within the same instant.
+        var candidates = await (
+            from o in _db.Set<OutboxRow>().AsNoTracking()
+            where o.PublishedAt == null &&
                 o.FailedAt == null &&
                 o.AvailableAt <= now &&
-                (o.LeaseUntil == null || o.LeaseUntil <= now))
-            .OrderBy(o => o.OccurredAt)
-            .ThenBy(o => o.Id)
+                (o.LeaseUntil == null || o.LeaseUntil <= now)
+            join c in _db.Set<ChangeRow>().AsNoTracking()
+                on new { o.TenantId, EventId = o.Id } equals new { c.TenantId, c.EventId } into changes
+            from c in changes.DefaultIfEmpty()
+            orderby o.OccurredAt, o.TenantId, (long?)c!.Sequence, o.Id
+            select o)
             .Take(batchSize)
             .ToListAsync(cancellationToken);
 

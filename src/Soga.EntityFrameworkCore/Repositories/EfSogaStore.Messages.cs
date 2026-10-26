@@ -46,8 +46,9 @@ internal sealed partial class EfSogaStore<TContext>
                     token);
                 if (existing is not null)
                 {
+                    // Compare with the text as first sent, not the current text, so an edit does not break retries (ADR 0011).
                     var status = existing.DeletedAt is not null ||
-                        string.Equals(existing.Content, command.Content, StringComparison.Ordinal)
+                        SogaText.IsSameSend(existing.ContentFingerprint, existing.Content, command.Content)
                         ? AppendStatus.Duplicate
                         : AppendStatus.IdempotencyConflict;
                     return new AppendMessageOutcome(status, (await HydrateAsync(command.TenantId, [existing], token))[0]);
@@ -86,6 +87,7 @@ internal sealed partial class EfSogaStore<TContext>
                     ClientMessageId = command.ClientMessageId,
                     Kind = command.IsSystem ? SogaMessageKinds.System : SogaMessageKinds.Text,
                     Content = command.Content,
+                    ContentFingerprint = SogaText.Fingerprint(command.Content),
                     CreatedAt = command.Now,
                     ReplyToMessageId = command.ReplyToMessageId,
                 };
@@ -220,6 +222,7 @@ internal sealed partial class EfSogaStore<TContext>
                     .Where(m => m.TenantId == command.TenantId && m.Id == command.MessageId)
                     .ExecuteUpdateAsync(
                         s => s.SetProperty(m => m.Content, string.Empty)
+                            .SetProperty(m => m.ContentFingerprint, (string?)null)
                             .SetProperty(m => m.DeletedAt, (DateTimeOffset?)command.Now)
                             .SetProperty(m => m.DeletedBy, command.UserId),
                         token);
@@ -230,6 +233,7 @@ internal sealed partial class EfSogaStore<TContext>
                     .ExecuteDeleteAsync(token);
 
                 message.Content = string.Empty;
+                message.ContentFingerprint = null;
                 message.DeletedAt = command.Now;
                 message.DeletedBy = command.UserId;
                 var record = new MessageRecord(

@@ -445,6 +445,7 @@ internal sealed partial class EfSogaStore<TContext> : ISogaStore
             ClientMessageId = clientMessageId,
             Kind = SogaMessageKinds.System,
             Content = content,
+            ContentFingerprint = SogaText.Fingerprint(content),
             CreatedAt = command.Now,
         });
 

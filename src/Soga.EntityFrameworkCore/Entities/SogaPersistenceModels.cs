@@ -132,6 +132,16 @@ internal sealed class MessageRow
 
     /// <summary>Gets or sets the ID of the message this one replies to.</summary>
     public Guid? ReplyToMessageId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the SHA-256 fingerprint of the text as first sent, used to recognize an idempotent retry.
+    /// </summary>
+    /// <remarks>
+    /// It never changes on edit, so a retry of the original send still returns the message after an edit (ADR 0011).
+    /// It is erased with the text on deletion. Rows written before this column existed hold <see langword="null"/>,
+    /// and retries of them are compared with the current text instead.
+    /// </remarks>
+    public string? ContentFingerprint { get; set; }
 }
 
 /// <summary>

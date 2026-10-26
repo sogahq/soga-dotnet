@@ -110,6 +110,7 @@ public static class SogaModelBuilderExtensions
             entity.Property(x => x.CreatedAt).HasConversion<UtcDateTimeConverter>();
             entity.Property(x => x.EditedAt).HasConversion<NullableUtcDateTimeConverter>();
             entity.Property(x => x.DeletedAt).HasConversion<NullableUtcDateTimeConverter>();
+            entity.Property(x => x.ContentFingerprint).HasMaxLength(64);
             entity.HasIndex(x => new { x.TenantId, x.ConversationId, x.Sequence }).IsUnique();
             entity.HasIndex(x => new { x.TenantId, x.ConversationId, x.SenderId, x.ClientMessageId }).IsUnique();
             ReferenceConversation(entity);

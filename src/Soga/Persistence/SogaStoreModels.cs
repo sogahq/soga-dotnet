@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Soga.Abstractions;
 using Soga.Contracts;
 using Soga.Conversations;
@@ -99,6 +101,9 @@ internal sealed record ConversationRecord(
 /// <param name="DeletedBy">Who deleted the message, if it was deleted.</param>
 /// <param name="ReplyToMessageId">The ID of the message this one replies to, if any.</param>
 /// <param name="ReplyTo">The summary of the message this one replies to, if loaded.</param>
+/// <param name="SentFingerprint">
+/// The <see cref="SogaText.Fingerprint"/> of the text as first sent, used to recognize retries. Never returned to clients.
+/// </param>
 internal sealed record MessageRecord(
     Guid Id,
     Guid ConversationId,
@@ -112,7 +117,8 @@ internal sealed record MessageRecord(
     DateTimeOffset? DeletedAt = null,
     string? DeletedBy = null,
     Guid? ReplyToMessageId = null,
-    ReplyInfo? ReplyTo = null)
+    ReplyInfo? ReplyTo = null,
+    string? SentFingerprint = null)
 {
     /// <summary>Gets a value indicating whether the message has been deleted.</summary>
     public bool IsDeleted => DeletedAt is not null;
@@ -532,6 +538,33 @@ internal static class SogaText
         var length = char.IsHighSurrogate(content[SnippetLength - 1]) ? SnippetLength - 1 : SnippetLength;
         return content[..length];
     }
+
+    /// <summary>
+    /// Computes the fingerprint of message text as it was first sent.
+    /// </summary>
+    /// <param name="content">The text exactly as the sender submitted it.</param>
+    /// <returns>The upper-case hexadecimal SHA-256 hash of the UTF-8 text, 64 characters long.</returns>
+    /// <remarks>
+    /// The fingerprint is stored with the message and never changes when the message is edited, so a retry of the
+    /// original send is still recognized after an edit (ADR 0011). It is erased together with the text on deletion.
+    /// </remarks>
+    public static string Fingerprint(string content) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
+
+    /// <summary>
+    /// Determines whether a send with an already used client message ID repeats the original request.
+    /// </summary>
+    /// <param name="storedFingerprint">The fingerprint stored with the message, or <see langword="null"/> for a message stored before fingerprints existed.</param>
+    /// <param name="storedContent">The message's current text, used only when there is no fingerprint.</param>
+    /// <param name="retryContent">The text of the new request.</param>
+    /// <returns>
+    /// <see langword="true"/> if <paramref name="retryContent"/> is exactly the text originally sent; otherwise,
+    /// <see langword="false"/>.
+    /// </returns>
+    public static bool IsSameSend(string? storedFingerprint, string storedContent, string retryContent) =>
+        storedFingerprint is not null
+            ? string.Equals(storedFingerprint, Fingerprint(retryContent), StringComparison.Ordinal)
+            : string.Equals(storedContent, retryContent, StringComparison.Ordinal);
 }
 
 /// <summary>

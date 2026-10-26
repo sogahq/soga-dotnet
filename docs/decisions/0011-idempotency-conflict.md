@@ -17,6 +17,8 @@ A client that times out must be able to retry a send without creating a duplicat
 
 Text is compared ordinally and exactly, with no trimming.
 
+**Edits do not break retries.** A retry is compared with the text as **first sent**, not the message's current text. Each message stores a SHA-256 fingerprint of its original text (`SogaMessages.ContentFingerprint`) that an edit never changes. So after an edit, retrying the original send still returns `200` with the (edited) message, and the same key with the edited text is a `409`, because it is not the original request. Deleting a message erases the fingerprint together with the text, and any retry of a deleted message returns the tombstone. Rows stored before the fingerprint existed have none and are compared with their current text.
+
 ## Alternatives considered
 
 Returning the existing message on a conflict was rejected: it discloses content to whoever guesses a key (only the same sender can, but the safer default costs nothing). Keying by content hash was rejected: two intentional identical messages must both be accepted.

@@ -22,6 +22,7 @@ Every protected operation goes through one application workflow that checks acti
 |---|---|---|
 | Sender impersonation | Sender derived from the principal; body fields ignored | `Send_IgnoresAnySenderSuppliedByTheClient` |
 | System-message impersonation | System kind is set only by trusted code; edit and delete refuse it | `SystemMessages_...CannotBeForgedByClients` |
+| Posing as the system sender | User IDs starting with `$soga:` are reserved: such a caller is unauthenticated and such an ID cannot be invited | `ReservedUserIds_...`, `AUserWithAReservedId_IsRefusedOverHttpAndSignalR` |
 | Insecure direct object reference | Membership checked for every conversation ID | `Outsider_SeesIdenticalNotFound...` |
 | Conversation enumeration | Missing, foreign, and other-tenant conversations answer identically, for group routes too | `Outsider_SeesIdenticalNotFoundForEveryGroupRoute` |
 | Privilege escalation through roles | Role rules table; only owners grant privilege; unknown roles are rejected, never downgraded | `RoleEscalationAttempts_AreAllRefused`, `GroupRulesTests` |
@@ -30,7 +31,8 @@ Every protected operation goes through one application workflow that checks acti
 | Former-participant access | Removal cuts HTTP, sync, and every live connection; only the removal notice remains | `RemovedParticipant_StopsReceivingOnEveryDeviceWhileStillConnected` |
 | Subscription persisting after removal | The publisher removes the user's connections from the group; re-subscribe is refused | same |
 | Edit or delete ownership bypass | Author-only edit; delete needs authorship or an admin role; both checked in the store | `MessageRulesTests`, `Message_EditDeleteAndReply_...` |
-| Deleted content exposure | Text is erased on delete, including retained edit history | `Delete_ErasesTextAndRetainedHistory...` |
+| Deleted content exposure | Text is erased on delete, including retained edit history and the retry fingerprint | `Delete_ErasesTextAndRetainedHistory...`, `Delete_ErasesTheFingerprintTogetherWithTheText` |
+| Duplicate or lost message on retry after an edit | Retries are compared with a fingerprint of the text as first sent, which edits never change | `IdempotencyAfterLifecycleTests`, `Retry_AfterAnEdit_...` |
 | Cross-conversation reply reference | Target must be in the same conversation and not deleted | `Reply_ToAnotherConversationsMessage_IsRefused` |
 | Metadata injection and leakage | Flat, bounded, validated; never included in events | `SogaMetadataTests` |
 | Typing and presence privacy | Members only; no text; last-seen off by default; can be disabled | `Typing_...`, `Presence_...` tests |

@@ -84,14 +84,31 @@ public sealed class SystemMessageTests
     [Theory]
     [InlineData("$soga:system")]
     [InlineData(" $soga:system ")]
-    public async Task AParticipantNamedLikeTheSystemSender_StillSendsOrdinaryTextMessages(string userId)
+    [InlineData("$soga:anything")]
+    public void ReservedUserIds_AreNeverAcceptedFromTheHost(string userId)
+    {
+        Assert.Null(Identity.SogaIdentity.NormalizeUserId(userId));
+    }
+
+    [Theory]
+    [InlineData("soga:system")]
+    [InlineData("$SOGA:system")]
+    [InlineData("x$soga:system")]
+    public void IdsThatOnlyLookSimilar_AreOrdinaryUsers(string userId)
+    {
+        Assert.Equal(userId, Identity.SogaIdentity.NormalizeUserId(userId));
+    }
+
+    [Fact]
+    public async Task ReservedUserIds_CannotBeInvitedOrAddressed()
     {
         using var soga = TestSoga.Create();
-        var impostor = new Identity.SogaCaller(TestSoga.Tenant, userId.Trim());
-        var group = await soga.CreateGroupAsync(impostor, "bob");
+        var group = await soga.CreateGroupAsync(TestSoga.Alice, "bob");
 
-        var sent = await soga.SendAsync(impostor, group.Id, "c1", "trust me");
+        var direct = await soga.Get<Soga.Conversations.ConversationWorkflow>().CreateDirectAsync(TestSoga.Alice, new CreateDirectConversationRequest(SogaSystemSender.UserId), default);
+        var newGroup = await soga.Get<GroupWorkflow>().CreateAsync(TestSoga.Alice, new CreateGroupRequest("T", [SogaSystemSender.UserId]), default);
+        var add = await soga.Get<GroupWorkflow>().AddParticipantAsync(TestSoga.Alice, group.Id, new AddParticipantRequest(SogaSystemSender.UserId), default);
 
-        Assert.Equal(SogaMessageKinds.Text, sent.Kind);
+        Assert.All([direct.Error?.Code, newGroup.Error?.Code, add.Error?.Code], code => Assert.Equal(Errors.SogaErrorCodes.InvalidRequest, code));
     }
 }

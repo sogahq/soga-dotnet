@@ -228,6 +228,28 @@ public sealed class RealtimeScenarioTests
         Assert.Contains(SogaErrorCodes.ConversationNotFound, exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task AUserWithAReservedId_IsRefusedOverHttpAndSignalR()
+    {
+        await using var server = await SogaTestServer.StartAsync();
+        await using var hub = server.Hub("$soga:system");
+
+        var http = await server.Client("$soga:system").GetAsync($"{P}/conversations");
+        try
+        {
+            await hub.StartAsync();
+            await hub.InvokeAsync<int>("NegotiateProtocol", SogaProtocol.Version);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or HubException or OperationCanceledException)
+        {
+            // The connection is aborted during setup.
+        }
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, http.StatusCode);
+        Assert.Equal(SogaErrorCodes.Unauthorized, await http.ErrorCodeAsync());
+        Assert.NotEqual(HubConnectionState.Connected, hub.State);
+    }
+
     private static async Task ConnectAndSubscribeAsync(HubConnection hub, Guid conversationId)
     {
         await hub.StartAsync();

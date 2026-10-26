@@ -9,7 +9,7 @@ Soga runs inside a host that already owns authentication and users. It must not 
 
 ## Decision
 
-**Identity.** The acting user comes from `ISogaUserContext`. The default reads the claim named by `Soga:Identity:UserIdClaimType` (default `ClaimTypes.NameIdentifier`) from the authenticated principal. User IDs are opaque strings: trimmed, at most 200 characters, compared **ordinally** (case-sensitive). Soga never queries the host user table and stores no foreign key to it.
+**Identity.** The acting user comes from `ISogaUserContext`. The default reads the claim named by `Soga:Identity:UserIdClaimType` (default `ClaimTypes.NameIdentifier`) from the authenticated principal. User IDs are opaque strings: trimmed, at most 200 characters, compared **ordinally** (case-sensitive). IDs starting with `$soga:` are reserved for Soga itself (the system message sender is `$soga:system`): a caller with such an ID is treated as unauthenticated, and such an ID cannot be invited or addressed. Soga never queries the host user table and stores no foreign key to it.
 
 **Tenancy.** The active tenant comes from `ISogaTenantContext`. The default returns the configured `DefaultTenantId` (`default`), so a single-tenant host has a documented, safe boundary. Tenant IDs are trimmed and at most 100 characters. The tenant is part of every primary key, unique index, cursor, and SignalR group name, and every store method takes it explicitly so a query cannot omit it.
 

@@ -26,7 +26,7 @@ Generate the migration with `dotnet ef migrations add SogaV2` and review it. It 
 |---|---|
 | `SogaConversations` | new `Kind` (not null), `Title`, `MetadataJson`, `ArchivedAt`; new index on `(TenantId, ExternalReference)` |
 | `SogaParticipants` | new `Role` (not null, stored as text) |
-| `SogaMessages` | new `EditedAt`, `DeletedAt`, `DeletedBy`, `ReplyToMessageId` (all nullable) |
+| `SogaMessages` | new `EditedAt`, `DeletedAt`, `DeletedBy`, `ReplyToMessageId`, `ContentFingerprint` (all nullable; the fingerprint is at most 64 characters) |
 | `SogaChanges` | new `TargetUserId` (nullable) and an index on `(TenantId, TargetUserId, Sequence)` |
 | `SogaMessageEdits` | **new table** (edit history, only written when `Messages:RetainEditHistory` is on) |
 
@@ -39,7 +39,7 @@ UPDATE SogaConversations SET Kind = 'Direct' WHERE Kind = '';
 UPDATE SogaParticipants  SET Role = 'Member' WHERE Role = '';
 ```
 
-Put these in the migration's `Up` method after the columns are added, so the change is applied as one step. Every V1 conversation is a direct conversation and every V1 participant is an ordinary member. Nothing else needs data changes: `DirectKey`, sequences, read positions, messages, changes, and outbox rows are compatible.
+Put these in the migration's `Up` method after the columns are added, so the change is applied as one step. Every V1 conversation is a direct conversation and every V1 participant is an ordinary member. `ContentFingerprint` needs no backfill: V1 messages keep it null and their retries are compared with their current text, exactly as in V1. Nothing else needs data changes: `DirectKey`, sequences, read positions, messages, changes, and outbox rows are compatible.
 
 ## 5. SQL Server only: the identity collation
 
@@ -57,6 +57,10 @@ Before you switch:
    ```
 2. **Plan a maintenance window.** Changing a column's collation means dropping and recreating the keys and indexes that contain it. The generated migration may need editing to do this in the right order. Test on a copy.
 3. Make sure your identity provider already emits the exact case you store, since matching is now exact.
+
+## 5a. All providers: reserved user IDs
+
+User IDs starting with `$soga:` are now reserved. If your identity provider can issue such IDs, those users are refused (`401`) after the upgrade. This is very unlikely, but check before you deploy.
 
 PostgreSQL and SQLite hosts need no collation change.
 

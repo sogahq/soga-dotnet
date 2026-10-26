@@ -47,11 +47,26 @@ internal static class SogaIdentity
     }
 
     /// <summary>
+    /// The prefix of user IDs reserved for Soga itself, such as the system message sender.
+    /// </summary>
+    public const string ReservedUserIdPrefix = "$soga:";
+
+    /// <summary>
     /// Normalizes a user ID using the <see cref="SogaOptions.MaximumUserIdLength"/> limit.
     /// </summary>
     /// <param name="raw">The user ID as supplied by the host.</param>
-    /// <returns>The normalized user ID, or <see langword="null"/> when it is missing or too long.</returns>
-    public static string? NormalizeUserId(string? raw) => Normalize(raw, SogaOptions.MaximumUserIdLength);
+    /// <returns>
+    /// The normalized user ID, or <see langword="null"/> when it is missing, too long, or starts with
+    /// <see cref="ReservedUserIdPrefix"/>.
+    /// </returns>
+    /// <remarks>
+    /// Reserved IDs are refused so that no real user can act as, or be confused with, the system message sender.
+    /// </remarks>
+    public static string? NormalizeUserId(string? raw)
+    {
+        var value = Normalize(raw, SogaOptions.MaximumUserIdLength);
+        return value is not null && value.StartsWith(ReservedUserIdPrefix, StringComparison.Ordinal) ? null : value;
+    }
 
     /// <summary>
     /// Reads and normalizes the user ID from an authenticated principal.

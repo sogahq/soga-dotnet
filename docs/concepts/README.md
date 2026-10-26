@@ -43,7 +43,7 @@ A former participant has no access to the conversation or its history, including
 
 ## Messages
 
-`clientMessageId` is required. Sending the same key with the same text returns the original message (`200`). The same key with different text returns `409 soga.message.idempotency_conflict`. Keys are scoped per sender and conversation (ADR 0011).
+`clientMessageId` is required. Sending the same key with the same text returns the original message (`200`). The same key with different text returns `409 soga.message.idempotency_conflict`. Keys are scoped per sender and conversation (ADR 0011). A retry is compared with the text as first sent, so editing a message never turns a retry of the original send into a conflict.
 
 Content is plain text, at most `Messages:MaximumTextLength` UTF-16 units (default 8000, else `422 soga.message.too_long`). It is untrusted: encode it when rendering.
 

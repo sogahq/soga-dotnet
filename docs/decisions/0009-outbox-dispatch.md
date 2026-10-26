@@ -17,7 +17,7 @@ The outbox row is written in the same transaction as the message. A hosted servi
 
 **Delivery** is at least once. A crash after publishing and before completing republishes; clients deduplicate by event ID.
 
-**Ordering.** Events are claimed oldest first, but retries can reorder. Clients order by `sequence`, never by arrival.
+**Ordering.** Events are claimed oldest first. Events with the same timestamp are claimed in commit order (their change-log sequence), so a conversation is never announced after a message sent in it in the same instant. Retries can still reorder, so clients order by `sequence`, never by arrival.
 
 **Latency.** Workflows signal the dispatcher after commit, so delivery does not wait for the poll interval (default 1 s), which remains as a fallback and for other instances.
 

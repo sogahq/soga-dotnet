@@ -16,10 +16,22 @@
   <Folder Name="/docs/">
     <File Path="docs/README.md" />
     <File Path="docs/concepts/README.md" />
-    <File Path="docs/decisions/0004-ef-core-integration.md" />
     <File Path="docs/deployment/README.md" />
     <File Path="docs/getting-started/README.md" />
     <File Path="docs/security/README.md" />
+  </Folder>
+  <Folder Name="/docs/decisions/">
+    <File Path="docs/decisions/0001-public-id-format.md" />
+    <File Path="docs/decisions/0002-tenancy-and-identity.md" />
+    <File Path="docs/decisions/0003-http-endpoint-style.md" />
+    <File Path="docs/decisions/0004-ef-core-integration.md" />
+    <File Path="docs/decisions/0005-migration-ownership.md" />
+    <File Path="docs/decisions/0006-conversation-sequence-allocation.md" />
+    <File Path="docs/decisions/0007-direct-conversation-uniqueness.md" />
+    <File Path="docs/decisions/0008-sync-log-and-cursor.md" />
+    <File Path="docs/decisions/0009-outbox-dispatch.md" />
+    <File Path="docs/decisions/0010-protocol-versioning.md" />
+    <File Path="docs/decisions/0011-idempotency-conflict.md" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Soga.MarketplaceSample/Soga.MarketplaceSample.csproj" />

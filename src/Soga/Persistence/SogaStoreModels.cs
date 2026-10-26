@@ -2,7 +2,6 @@ using Soga.Contracts;
 
 namespace Soga.Persistence;
 
-
 internal sealed record ConversationRecord(
     Guid Id,
     string? ExternalReference,

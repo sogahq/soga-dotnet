@@ -10,7 +10,7 @@ Soga is an open-source, self-hosted messaging framework for ASP.NET Core. It pro
 
 Soga runs inside the developer's own ASP.NET Core application. It is not a hosted SaaS service. The developer keeps control of their users, database, messages, deployment, and infrastructure.
 
-> **Status:** Soga is currently in planning and early development. Its public API is not stable, and it is not ready for production use.
+> **Status:** Soga is in preview (`0.1.0-preview.1`). The focused V1 direct-messaging path is implemented and tested, but the public API, protocol, and database schema are not stable and it is not yet recommended for production use.
 
 ## Why Soga?
 
@@ -18,9 +18,7 @@ SignalR provides realtime communication, but it does not provide a complete mess
 
 Soga packages these capabilities into a reusable ASP.NET Core framework.
 
-## Initial focus
-
-The first release will focus on a reliable direct-messaging path:
+## What V1 does
 
 ```text
 Authenticate
@@ -33,33 +31,27 @@ Authenticate
 → mark the conversation as read
 ```
 
-The initial scope includes:
-
-- integration with the host application's authentication;
-- direct conversations;
-- durable text messages;
-- safe retry and duplicate-send protection;
-- cursor-based message history;
-- realtime delivery through SignalR;
+- integration with the host application's authentication and optional tenancy;
+- direct conversations, with an optional external reference such as an order ID;
+- durable text messages with safe retry (idempotency);
+- deterministic per-conversation ordering and cursor-based history;
+- realtime delivery through SignalR, published from a transactional outbox;
 - reconnection and missed-message synchronization;
 - read positions and unread counts;
-- EF Core persistence;
-- security, testing, and diagnostics.
+- EF Core persistence, health checks, logging, tracing, and metrics.
 
 Advanced features such as groups, attachments, typing, presence, reactions, client SDKs, and hosted services will come later.
 
 ## Packages
 
-Soga will initially provide:
-
 | Package | Purpose |
 |---|---|
-| `Soga` | The ASP.NET Core messaging framework, protocol, SignalR integration, and development provider |
-| `Soga.EntityFrameworkCore` | Optional relational database persistence using EF Core |
+| `Soga` | The ASP.NET Core messaging framework, protocol, SignalR integration, and in-memory development provider |
+| `Soga.EntityFrameworkCore` | Relational database persistence using EF Core |
 
 `Soga.Client` will be developed after the backend protocol is stable.
 
-## Planned usage
+## Usage
 
 ```bash
 dotnet add package Soga
@@ -71,15 +63,36 @@ builder.Services
     .AddSoga(options =>
     {
         options.RoutePrefix = "/soga/v1";
+        options.Messages.MaximumTextLength = 8_000;
     })
     .UseEntityFrameworkCore<AppDbContext>();
 
 app.MapSoga();
 ```
 
-Calling `MapSoga()` maps Soga's HTTP API and SignalR integration inside the developer's own application. `/soga/v1` is a proposed configurable default prefix; it is not an external Soga service address.
+```csharp
+// In your DbContext:
+protected override void OnModelCreating(ModelBuilder modelBuilder) => modelBuilder.AddSoga();
+```
 
-The exact API may change during development.
+Calling `MapSoga()` maps Soga's HTTP API and SignalR hub inside the developer's own application. `/soga/v1` is a configurable default prefix; it is not an external Soga service address. Your application owns the database migrations.
+
+See [Getting started](docs/getting-started/README.md) for the full walkthrough, and [Concepts](docs/concepts/README.md) for the HTTP API, events, and error codes.
+
+## Build and test
+
+```bash
+dotnet restore
+dotnet build -warnaserror
+dotnet test
+dotnet pack src/Soga/Soga.csproj -c Release -o artifacts/packages
+dotnet pack src/Soga.EntityFrameworkCore/Soga.EntityFrameworkCore.csproj -c Release -o artifacts/packages
+```
+
+```bash
+dotnet run --project samples/Soga.MinimalSample
+dotnet run --project samples/Soga.MarketplaceSample
+```
 
 ## Design principles
 
@@ -95,19 +108,22 @@ The exact API may change during development.
 
 ## Documentation
 
-Project documentation will include getting started, authentication, EF Core setup, conversations, synchronization, security, deployment, API reference, troubleshooting, and upgrades.
-
-Detailed architecture and endpoint specifications are maintained outside this README.
+- [Getting started](docs/getting-started/README.md)
+- [Concepts, HTTP API, events, and errors](docs/concepts/README.md)
+- [Security and threat model](docs/security/README.md)
+- [Deployment and operations](docs/deployment/README.md)
+- [Architecture decisions](docs/decisions/)
+- [Architecture and engineering guide](SOGA_ARCHITECTURE_AND_ENGINEERING_GUIDE.md)
 
 ## Contributing
 
-Contribution instructions will be published in `CONTRIBUTING.md`. Major architecture or public API changes should be discussed before implementation and documented through architecture decision records.
+Read `CONTRIBUTING.md`. Major architecture or public API changes should be discussed before implementation and documented through architecture decision records.
 
 ## Security
 
-Soga will require authentication by default and will not trust client-supplied sender identities. A private vulnerability-reporting process will be documented in `SECURITY.md` before public release.
+Soga requires authentication by default and does not trust client-supplied sender identities. Report vulnerabilities privately as described in `SECURITY.md`.
 
-Soga V1 will use HTTPS for transport security and will not provide end-to-end encryption.
+Soga V1 uses HTTPS for transport security and does not provide end-to-end encryption.
 
 ## Ownership
 

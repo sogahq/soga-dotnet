@@ -4,7 +4,15 @@ internal sealed class ConversationRow
 {
     public Guid Id { get; set; }
     public required string TenantId { get; set; }
-    public long NextSequence { get; set; }
+
+    /// <summary>SHA-256 of the unordered user pair and external reference. A unique index makes direct-conversation creation concurrency-safe.</summary>
+    public required string DirectKey { get; set; }
+
+    public string? ExternalReference { get; set; }
+
+    /// <summary>The last allocated message sequence. Advanced atomically inside the sending transaction.</summary>
+    public long LastSequence { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset LastActivityAt { get; set; }
 }
@@ -15,6 +23,7 @@ internal sealed class ParticipantRow
     public required string TenantId { get; set; }
     public required string UserId { get; set; }
     public long LastReadSequence { get; set; }
+    public DateTimeOffset? LastReadAt { get; set; }
     public DateTimeOffset JoinedAt { get; set; }
     public DateTimeOffset? LeftAt { get; set; }
 }
@@ -26,12 +35,32 @@ internal sealed class MessageRow
     public required string TenantId { get; set; }
     public required string SenderId { get; set; }
     public required string ClientMessageId { get; set; }
+    public required string Kind { get; set; }
     public required string Content { get; set; }
     public long Sequence { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+/// <summary>The durable, ordered change stream that reconnecting clients synchronize from.</summary>
+internal sealed class ChangeRow
+{
+    public required string TenantId { get; set; }
 
+    /// <summary>A per-tenant sequence allocated under a row lock, so commit order equals sequence order and a cursor can never skip a change.</summary>
+    public long Sequence { get; set; }
+
+    public Guid EventId { get; set; }
+    public required string ChangeType { get; set; }
+    public Guid ConversationId { get; set; }
+    public required string Payload { get; set; }
+    public DateTimeOffset OccurredAt { get; set; }
+}
+
+internal sealed class TenantStateRow
+{
+    public required string TenantId { get; set; }
+    public long LastChangeSequence { get; set; }
+}
 
 internal sealed class OutboxRow
 {
@@ -40,6 +69,12 @@ internal sealed class OutboxRow
     public required string EventType { get; set; }
     public required string Payload { get; set; }
     public DateTimeOffset OccurredAt { get; set; }
-    public DateTimeOffset? PublishedAt { get; set; }
+    public DateTimeOffset AvailableAt { get; set; }
+    public DateTimeOffset? LeaseUntil { get; set; }
     public int AttemptCount { get; set; }
+    public DateTimeOffset? PublishedAt { get; set; }
+    public DateTimeOffset? FailedAt { get; set; }
+
+    /// <summary>The failure exception type name only. Message text is never stored because it may contain private content.</summary>
+    public string? LastFailure { get; set; }
 }

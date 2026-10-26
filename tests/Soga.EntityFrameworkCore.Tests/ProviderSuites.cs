@@ -27,3 +27,9 @@ public sealed class PostgresEfIdentityTests() : EfIdentityTestsBase(new Postgres
 public sealed class SqlServerEfConcurrencyTests() : EfConcurrencyTestsBase(new SqlServerFixture());
 
 public sealed class PostgresEfConcurrencyTests() : EfConcurrencyTestsBase(new PostgresFixture());
+
+public sealed class SqliteEfRetryAndOrderingTests() : EfRetryAndOrderingTestsBase(new SqliteFixture());
+
+public sealed class SqlServerEfRetryAndOrderingTests() : EfRetryAndOrderingTestsBase(new SqlServerFixture());
+
+public sealed class PostgresEfRetryAndOrderingTests() : EfRetryAndOrderingTestsBase(new PostgresFixture());

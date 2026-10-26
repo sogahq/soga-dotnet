@@ -1,9 +1,9 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>Soga</PackageId>
-    <Version>0.1.0-preview.1</Version>
+    <Version>0.2.0-preview.1</Version>
     <Authors>Zhuwa Africa Limited</Authors>
     <Description>Embeddable direct messaging primitives and ASP.NET Core integration.</Description>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>

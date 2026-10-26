@@ -1,71 +1,105 @@
 using System.Security.Claims;
 using Microsoft.Extensions.Options;
-using Soga.Abstractions;
 using Soga.Configuration;
 using Soga.Errors;
 using Soga.Tenancy;
 
 namespace Soga.Identity;
 
-/// <summary>The resolved, trusted identity of whoever is making a request.</summary>
-/// <param name="TenantId">The normalized tenant the caller belongs to.</param>
-/// <param name="UserId">The normalized host user ID of the caller.</param>
+/// <summary>
+/// Represents the trusted user and tenant performing one operation.
+/// </summary>
+/// <param name="TenantId">The normalized ID of the tenant the operation runs in.</param>
+/// <param name="UserId">The normalized ID of the acting user.</param>
+/// <remarks>
+/// A caller is only ever built by <see cref="SogaCallerResolver"/> from server-side context, never from a request
+/// payload, so a client cannot impersonate another user or reach another tenant.
+/// </remarks>
 internal readonly record struct SogaCaller(string TenantId, string UserId);
 
-/// <summary>Helpers for turning raw identity values into the normalized form Soga stores and compares.</summary>
+/// <summary>
+/// Provides normalization rules for user and tenant identifiers supplied by the host.
+/// </summary>
+/// <remarks>
+/// Identifiers are opaque strings. They are trimmed but never lower-cased, and are always compared ordinally, so
+/// <c>Alice</c> and <c>alice</c> are different users.
+/// </remarks>
 internal static class SogaIdentity
 {
-    /// <summary>Trims <paramref name="raw"/> and cuts it to at most <paramref name="maxLength"/> characters.</summary>
-    /// <param name="raw">The raw value to normalize.</param>
-    /// <param name="maxLength">The maximum length of the result.</param>
-    /// <returns>The normalized value, or <see langword="null"/> when <paramref name="raw"/> is null, empty or whitespace.</returns>
-    /// <remarks>
-    /// Over-long values are truncated rather than rejected. Two different IDs that share the same
-    /// first <paramref name="maxLength"/> characters therefore become the same ID.
-    /// </remarks>
-    public static string? Normalize(string? raw, int maxLength)
+    /// <summary>
+    /// Normalizes a host-supplied identifier.
+    /// </summary>
+    /// <param name="raw">The identifier as supplied by the host.</param>
+    /// <param name="maximumLength">The maximum number of characters allowed after trimming.</param>
+    /// <returns>
+    /// The trimmed identifier, or <see langword="null"/> when <paramref name="raw"/> is empty, whitespace, or longer
+    /// than <paramref name="maximumLength"/>.
+    /// </returns>
+    public static string? Normalize(string? raw, int maximumLength)
     {
-        // Whitespace-only input must count as "no value"; otherwise it would trim to "" and
-        // be treated as a valid (empty) ID.
-        if (string.IsNullOrWhiteSpace(raw)) return null;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
 
         var value = raw.Trim();
-        return value.Length > maxLength ? value[..maxLength] : value;
+        return value.Length <= maximumLength ? value : null;
     }
 
-    /// <summary>Normalizes a host user ID to the maximum supported user ID length.</summary>
+    /// <summary>
+    /// Normalizes a user ID using the <see cref="SogaOptions.MaximumUserIdLength"/> limit.
+    /// </summary>
+    /// <param name="raw">The user ID as supplied by the host.</param>
+    /// <returns>The normalized user ID, or <see langword="null"/> when it is missing or too long.</returns>
     public static string? NormalizeUserId(string? raw) => Normalize(raw, SogaOptions.MaximumUserIdLength);
 
-    /// <summary>Reads the normalized user ID from <paramref name="principal"/>.</summary>
-    /// <param name="principal">The principal to read from; may be <see langword="null"/>.</param>
-    /// <param name="claimType">The claim type that carries the user ID.</param>
-    /// <returns>The user ID, or <see langword="null"/> when the principal is missing, unauthenticated, or has no usable claim.</returns>
+    /// <summary>
+    /// Reads and normalizes the user ID from an authenticated principal.
+    /// </summary>
+    /// <param name="principal">The principal to read from.</param>
+    /// <param name="claimType">The claim type that holds the user ID.</param>
+    /// <returns>
+    /// The normalized user ID, or <see langword="null"/> when the principal is not authenticated or has no usable
+    /// claim of type <paramref name="claimType"/>.
+    /// </returns>
     public static string? FromPrincipal(ClaimsPrincipal? principal, string claimType)
     {
-        // Only authenticated principals are trusted; an anonymous principal can still carry claims.
-        if (principal?.Identity?.IsAuthenticated != true) return null;
+        if (principal?.Identity?.IsAuthenticated != true)
+        {
+            return null;
+        }
 
-        return NormalizeUserId(principal.FindFirst(claimType)?.Value);
+        return NormalizeUserId(principal.FindFirstValue(claimType));
     }
 }
 
-/// <summary>Builds a <see cref="SogaCaller"/> (tenant and user) for the current request.</summary>
+/// <summary>
+/// Builds the <see cref="SogaCaller"/> for an operation from the host's user and tenant resolvers.
+/// </summary>
+/// <param name="users">The resolver for the acting user on HTTP requests.</param>
+/// <param name="tenants">The resolver for the active tenant.</param>
+/// <param name="options">The Soga options that name the user ID claim type.</param>
 internal sealed class SogaCallerResolver(
     ISogaUserContext users,
     ISogaTenantContext tenants,
     IOptions<SogaOptions> options)
 {
-    /// <summary>Resolves the caller.</summary>
+    /// <summary>
+    /// Resolves the trusted caller for the current operation.
+    /// </summary>
     /// <param name="principal">
-    /// The principal to read the user from. When <see langword="null"/>, the user is taken from
-    /// <see cref="ISogaUserContext"/> instead (for example when there is no direct access to the HTTP user).
+    /// The SignalR connection principal, or <see langword="null"/> for HTTP requests, which use
+    /// <see cref="ISogaUserContext"/> instead.
     /// </param>
-    /// <param name="cancellationToken">A token to cancel the operation.</param>
+    /// <param name="cancellationToken">A token to monitor for cancellation requests.</param>
     /// <returns>
-    /// The caller on success; <see cref="SogaErrorFactory.Unauthorized"/> when no user can be determined, or
-    /// <see cref="SogaErrorFactory.TenantUnavailable"/> when no tenant can be determined.
+    /// A task that represents the asynchronous operation. The task result contains the caller, or fails with
+    /// <see cref="SogaErrors.Unauthorized"/> when there is no user and <see cref="SogaErrors.TenantUnavailable"/>
+    /// when the tenant cannot be resolved.
     /// </returns>
-    public async ValueTask<SogaResult<SogaCaller>> ResolveAsync(ClaimsPrincipal? principal, CancellationToken cancellationToken)
+    public async ValueTask<SogaResult<SogaCaller>> ResolveAsync(
+        ClaimsPrincipal? principal,
+        CancellationToken cancellationToken)
     {
         var userId = principal is null
             ? SogaIdentity.NormalizeUserId(await users.GetUserIdAsync(cancellationToken))
@@ -73,16 +107,15 @@ internal sealed class SogaCallerResolver(
 
         if (userId is null)
         {
-            return SogaResult<SogaCaller>.Fail(SogaErrorFactory.Unauthorized);
+            return SogaResult<SogaCaller>.Fail(SogaErrors.Unauthorized);
         }
 
-        // The tenant always comes from trusted host logic, never from the request.
         var tenantId = SogaIdentity.Normalize(
             await tenants.GetTenantIdAsync(cancellationToken),
             SogaOptions.MaximumTenantIdLength);
 
         return tenantId is null
-            ? SogaResult<SogaCaller>.Fail(SogaErrorFactory.TenantUnavailable)
+            ? SogaResult<SogaCaller>.Fail(SogaErrors.TenantUnavailable)
             : SogaResult<SogaCaller>.Ok(new SogaCaller(tenantId, userId));
     }
 }

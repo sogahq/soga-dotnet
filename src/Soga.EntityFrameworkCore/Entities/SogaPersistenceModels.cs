@@ -31,6 +31,8 @@ internal sealed class MessageRow
     public DateTimeOffset CreatedAt { get; set; }
 }
 
+
+
 internal sealed class OutboxRow
 {
     public Guid Id { get; set; }
